@@ -7,6 +7,7 @@ Sub-Store「脚本操作」脚本合集。
 | 脚本 | 说明 |
 | --- | --- |
 | [mihomo节点域名替换](./scripts/mihomo节点域名替换) | 根据 `hosts` 映射表批量替换 mihomo 节点 `server` 为别名域名 |
+| [节点多IP裂变](./scripts/节点多IP裂变) | 用 DoH（可带 ECS）解析域名节点为多个入口 IP，并把每个 IP 裂变成一个节点 |
 
 ## 目录结构
 
