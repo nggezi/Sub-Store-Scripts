@@ -1,4 +1,4 @@
-# mihomo-hosts-server-rewrite
+# mihomo节点域名替换
 
 根据 `hosts` 映射表，把所有代理节点的 `server` 字段批量替换为别名域名；未命中的 server 保持原样。
 

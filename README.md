@@ -6,7 +6,7 @@ Sub-Store「脚本操作」脚本合集。
 
 | 脚本 | 说明 |
 | --- | --- |
-| [mihomo-hosts-server-rewrite](./scripts/mihomo-hosts-server-rewrite) | 根据 `hosts` 映射表批量替换 mihomo 节点 `server` 为别名域名 |
+| [mihomo节点域名替换](./scripts/mihomo节点域名替换) | 根据 `hosts` 映射表批量替换 mihomo 节点 `server` 为别名域名 |
 
 ## 目录结构
 
