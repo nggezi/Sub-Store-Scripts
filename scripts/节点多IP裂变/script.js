@@ -1,10 +1,10 @@
 async function operator(proxies, targetPlatform, context) {
-  // 参数：键 edns，值为 JSON 数组，如 [{"name":"联通","ip":"119.36.124.169"},...]
-  // 默认值：联通/电信/移动
+  // 参数：键 edns，值为 JSON 数组，如 [{"name":"移","ip":"111.47.229.151"},...]
+  // 默认值：移动/电信/联通（缩写 移/电/联，顺序 移→电→联）
   const defaultEdns = [
-    { name: '联通', ip: '119.36.124.169' },
-    { name: '电信', ip: '116.207.181.162' },
-    { name: '移动', ip: '111.47.229.151' },
+    { name: '移', ip: '111.47.229.151' },
+    { name: '电', ip: '116.207.181.162' },
+    { name: '联', ip: '119.36.124.169' },
   ];
   const doh = 'https://223.6.6.6/dns-query';
   const type = 'A';
