@@ -5,8 +5,8 @@
 ## 命名规则
 
 - 用 ip-api.com 查询每个入口 IP 的运营商，命名格式为「运营商 + IP 第一段」：
-  - 深圳电信 `119.x.x.x` → `电信119 1 - 原名`
-  - 广州联通 `36.x.x.x` → `联通36 2 - 原名`
+  - 深圳电信 `119.x.x.x` → `电信119 - 原名`（默认不带序号）
+  - 开启参数 `seq` 后：`电信119 1 - 原名`
 - 运营商英文映射：Tencent→腾讯、Alibaba→阿里、Huawei→华为、Telecom→电信、Unicom→联通、Mobile→移动…
 - 同一 IP 去重（一个 IP 只生成一个节点）。
 - 地理定位失败时，兜底用 EDNS 线路名（单线路全称，多线路首字，如 `移/电/联`）。
@@ -22,13 +22,19 @@
 [{"name":"移动","ip":"111.47.229.151"},{"name":"电信","ip":"116.207.181.162"},{"name":"联通","ip":"119.36.124.169"}]
 ```
 
-- 键 `doh`：DoH 服务器地址，默认 `https://223.6.6.6/dns-query`
+- 键 `doh`：DoH 服务器地址，默认 `https://doh.pub/dns-query`
 
 ```
 https://doh.pub/dns-query
 ```
 
-**默认值**：不填 `edns` 时内置 移动/电信/联通 三条；不填 `doh` 时用 `https://223.6.6.6/dns-query`。
+- 键 `seq`：命名是否带序号，默认关闭（`false`）。如 `true`
+
+```
+true
+```
+
+**默认值**：不填 `edns` 时内置 移动/电信/联通 三条；不填 `doh` 时用 `https://doh.pub/dns-query`；不填 `seq` 时**不带序号**。
 
 > 若日志出现 `HTTP/2: headers timeout`，说明 DoH 服务器超时/被限速，换个 DoH 即可（如 `https://doh.pub/dns-query`、`https://1.1.1.1/dns-query`）。
 

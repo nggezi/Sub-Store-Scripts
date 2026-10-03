@@ -8,6 +8,7 @@ async function operator(proxies = [], targetPlatform, context) {
     { name: '联通', ip: '119.36.124.169' },
   ];
   let doh = 'https://doh.pub/dns-query';
+  let seq = false; // 命名是否带序号，默认关闭
   const type = 'A';
 
   const log = (msg) => {
@@ -27,6 +28,7 @@ async function operator(proxies = [], targetPlatform, context) {
       } else if (arg && typeof arg === 'object') {
         if (Array.isArray(arg.edns) && arg.edns.length) edns = arg.edns;
         if (typeof arg.doh === 'string' && arg.doh) doh = arg.doh;
+        if (arg.seq != null) seq = arg.seq === true || arg.seq === 'true' || arg.seq === 1 || arg.seq === '1';
       }
     }
   } catch (e) {}
@@ -193,7 +195,8 @@ async function operator(proxies = [], targetPlatform, context) {
             const lines = ipLines.get(ip) || [];
             prefix = lines.length === 1 ? lines[0] : lines.map((n) => n[0]).join('/');
           }
-          list.push({ ...p, name: `${prefix} ${i + 1} - ${p.name}`, server: ip });
+          const newName = seq ? `${prefix} ${i + 1} - ${p.name}` : `${prefix} - ${p.name}`;
+          list.push({ ...p, name: newName, server: ip });
         });
         // 可选：保留原始域名节点
         // list.push({ ...p, name: `原始 - ${p.name}`, server: p._domain });
