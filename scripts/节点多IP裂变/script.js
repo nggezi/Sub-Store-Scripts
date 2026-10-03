@@ -1,10 +1,10 @@
 async function operator(proxies, targetPlatform, context) {
-  // 参数：键 edns，值为 JSON 数组，如 [{"name":"移","ip":"111.47.229.151"},...]
-  // 默认值：移动/电信/联通（缩写 移/电/联，顺序 移→电→联）
+  // 参数：键 edns，值为 JSON 数组，如 [{"name":"移动","ip":"111.47.229.151"},...]
+  // 默认值：移动/电信/联通（顺序 移→电→联）
   const defaultEdns = [
-    { name: '移', ip: '111.47.229.151' },
-    { name: '电', ip: '116.207.181.162' },
-    { name: '联', ip: '119.36.124.169' },
+    { name: '移动', ip: '111.47.229.151' },
+    { name: '电信', ip: '116.207.181.162' },
+    { name: '联通', ip: '119.36.124.169' },
   ];
   const doh = 'https://223.6.6.6/dns-query';
   const type = 'A';
@@ -68,7 +68,9 @@ async function operator(proxies, targetPlatform, context) {
         });
       });
       order.forEach((ip, i) => {
-        const prefix = names.get(ip).join('/');
+        const arr = names.get(ip);
+        // 单线路用全称（移动/电信/联通），多线路取首字缩写（移/电/联）
+        const prefix = arr.length === 1 ? arr[0] : arr.map((n) => n[0]).join('/');
         list.push({ ...p, name: `${prefix} ${i + 1} - ${p.name}`, server: ip });
       });
       // 可选：保留原始域名节点
