@@ -7,7 +7,7 @@ async function operator(proxies = [], targetPlatform, context) {
     { name: '电信', ip: '116.207.181.162' },
     { name: '联通', ip: '119.36.124.169' },
   ];
-  let doh = 'https://223.6.6.6/dns-query';
+  let doh = 'https://doh.pub/dns-query';
   const type = 'A';
 
   const log = (msg) => {
