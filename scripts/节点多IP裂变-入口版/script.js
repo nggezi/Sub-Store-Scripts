@@ -140,7 +140,7 @@ async function operator(proxies = [], targetPlatform, context) {
       if (p && p.server && !ProxyUtils.isIP(p.server)) {
         p._domain = p.server;
         p._resolved_ips = await Promise.all(
-          edns.map(({ ip, name }) => resolve(doh, p.server, type, { ip, name }))
+          edns.map(({ ip, name }) => resolve(p.server, { ip, name }))
         );
       }
     }
