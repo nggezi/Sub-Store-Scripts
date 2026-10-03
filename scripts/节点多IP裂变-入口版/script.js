@@ -1,7 +1,7 @@
 async function operator(proxies = [], targetPlatform, context) {
   // ===== 参数 =====
   // 键 edns：JSON 数组，如 [{"name":"移动","ip":"111.47.229.151"},...]，默认 移动/电信/联通
-  // 键 doh ：DoH 服务器，默认 https://223.6.6.6/dns-query（可换成 223.5.5.5 / doh.pub 等）
+  // 键 doh ：DoH 服务器，默认 https://doh.pub/dns-query（可换成 223.6.6.6 / 223.5.5.5 等）
   const defaultEdns = [
     { name: '移动', ip: '111.47.229.151' },
     { name: '电信', ip: '116.207.181.162' },
