@@ -24,3 +24,7 @@ scripts/
 1. 打开 Sub-Store → 订阅 → 添加「脚本操作」。
 2. 将对应目录下 `script.js` 的内容粘贴到脚本框。
 3. 按各脚本 README 的说明填写参数。
+
+## 脚本规范
+
+新增脚本请遵循 [CONTRIBUTING.md](./CONTRIBUTING.md)。
