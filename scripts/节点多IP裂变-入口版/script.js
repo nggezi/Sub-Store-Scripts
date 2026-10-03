@@ -1,4 +1,4 @@
-async function operator(proxies, targetPlatform, context) {
+async function operator(proxies = [], targetPlatform, context) {
   // ===== 参数 =====
   // 键 edns：JSON 数组，如 [{"name":"移动","ip":"111.47.229.151"},...]
   // 默认：移动/电信/联通
@@ -9,6 +9,10 @@ async function operator(proxies, targetPlatform, context) {
   ];
   const doh = 'https://223.6.6.6/dns-query';
   const type = 'A';
+
+  const log = (msg) => {
+    try { if (typeof $substore !== 'undefined' && $substore && $substore.info) $substore.info(msg); } catch (e) {}
+  };
 
   let edns = defaultEdns;
   try {
@@ -47,20 +51,28 @@ async function operator(proxies, targetPlatform, context) {
   const cacheGet = (k) => { try { return cache.get(k); } catch (e) { return undefined; } };
   const cacheSet = (k, v) => { try { cache.set(k, v); } catch (e) {} };
 
-  // DoH 解析（带 EDNS）
+  // DoH 解析（带 EDNS）。失败不抛错，返回空结果，避免中断整个 operator。
   const resolve = async (domain, { name, ip }) => {
     const id = `${doh}:${domain}:${type}:${name}:${ip}`;
     const cached = cacheGet(id);
     if (cached) return cached;
-    const res = await ProxyUtils.doh({ url: doh, domain, type, edns: ip });
-    const { answers } = res;
-    if (!Array.isArray(answers) || answers.length === 0) throw new Error('No answers');
-    let result = answers.filter((i) => i?.type === type).map((i) => i?.data).filter((i) => i);
-    if (result.length === 0) throw new Error('No answers');
-    result = [...new Set(result.flat())];
-    const data = { ip, name, result };
-    cacheSet(id, data);
-    return data;
+    try {
+      const res = await ProxyUtils.doh({ url: doh, domain, type, edns: ip });
+      const { answers } = res;
+      if (!Array.isArray(answers) || answers.length === 0) throw new Error('No answers');
+      let result = answers
+        .filter((i) => i && i.type === type)
+        .map((i) => i.data)
+        .filter(Boolean);
+      if (result.length === 0) throw new Error('No answers');
+      result = [...new Set(result.flat())].filter((x) => ProxyUtils.isIP(x));
+      const data = { ip, name, result };
+      cacheSet(id, data);
+      return data;
+    } catch (e) {
+      log(`resolve ${domain} via ${name || '?'} failed: ${(e && e.message) || e}`);
+      return { ip, name, result: [] };
+    }
   };
 
   // 通用 JSON HTTP 请求：兼容 $substore.http.get 与 $httpClient.get 两种 API
@@ -87,10 +99,6 @@ async function operator(proxies, targetPlatform, context) {
     return null;
   };
 
-  const log = (msg) => {
-    try { if (typeof $substore !== 'undefined' && $substore && $substore.info) $substore.info(msg); } catch (e) {}
-  };
-
   // IP 地理定位（ip-api.com，返回中文 city + 英文 isp）
   const geoip = async (ip) => {
     const cached = cacheGet('geo:' + ip);
@@ -109,68 +117,78 @@ async function operator(proxies, targetPlatform, context) {
     return geo;
   };
 
-  // 1. 解析所有域名节点
-  await Promise.all(proxies.map(async (p) => {
-    if (p && p.server && !ProxyUtils.isIP(p.server)) {
-      p._domain = p.server;
-      p._resolved_ips = await Promise.all(
-        edns.map(({ ip, name }) => resolve(doh, p.server, type, { ip, name }))
-      );
-    }
-  }));
+  try {
+    log(`operator start, proxies=${(proxies || []).length}, edns lines=${edns.length}`);
 
-  // 2. 收集全局唯一 IP + 每个 IP 对应的 EDNS 线路名（兜底命名用）
-  const ipLines = new Map();
-  const allIps = new Set();
-  proxies.forEach((p = {}) => {
-    const ips = p._resolved_ips;
-    if (!Array.isArray(ips)) return;
-    ips.forEach(({ name, result }) => {
-      (result || []).forEach((ip) => {
-        allIps.add(ip);
-        if (!ipLines.has(ip)) ipLines.set(ip, []);
-        const arr = ipLines.get(ip);
-        if (!arr.includes(name)) arr.push(name);
-      });
-    });
-  });
+    // 1. 解析所有域名节点
+    await Promise.all((proxies || []).map(async (p) => {
+      if (p && p.server && !ProxyUtils.isIP(p.server)) {
+        p._domain = p.server;
+        p._resolved_ips = await Promise.all(
+          edns.map(({ ip, name }) => resolve(doh, p.server, type, { ip, name }))
+        );
+      }
+    }));
 
-  // 3. 地理定位每个唯一 IP（缓存）
-  const geoMap = new Map();
-  await Promise.all([...allIps].map(async (ip) => {
-    geoMap.set(ip, await geoip(ip));
-  }));
-
-  // 4. 裂变命名
-  const list = [];
-  proxies.forEach((p = {}) => {
-    const ips = p._resolved_ips;
-    if (Array.isArray(ips) && ips.length > 0) {
-      const seen = new Set();
-      const nodeIps = [];
-      ips.forEach(({ result }) => {
+    // 2. 收集全局唯一 IP + 每个 IP 对应的 EDNS 线路名（兜底命名用）
+    const ipLines = new Map();
+    const allIps = new Set();
+    (proxies || []).forEach((p = {}) => {
+      const ips = p._resolved_ips;
+      if (!Array.isArray(ips)) return;
+      ips.forEach(({ name, result }) => {
         (result || []).forEach((ip) => {
-          if (!seen.has(ip)) { seen.add(ip); nodeIps.push(ip); }
+          allIps.add(ip);
+          if (!ipLines.has(ip)) ipLines.set(ip, []);
+          const arr = ipLines.get(ip);
+          if (!arr.includes(name)) arr.push(name);
         });
       });
-      nodeIps.forEach((ip, i) => {
-        const geo = geoMap.get(ip) || {};
-        let prefix;
-        if (geo.city && geo.operator) {
-          // 入口命名：城市首字 + 运营商首字（如 深圳电信 → 深电）
-          prefix = (geo.city[0] || '') + (geo.operator[0] || '');
-        } else {
-          // 兜底：EDNS 线路名（单线路全称，多线路首字）
-          const lines = ipLines.get(ip) || [];
-          prefix = lines.length === 1 ? lines[0] : lines.map((n) => n[0]).join('/');
-        }
-        list.push({ ...p, name: `${prefix} ${i + 1} - ${p.name}`, server: ip });
-      });
-      // 可选：保留原始域名节点
-      // list.push({ ...p, name: `原始 - ${p.name}`, server: p._domain });
-    } else {
-      list.push(p);
-    }
-  });
-  return list;
+    });
+    log(`resolved unique ips=${allIps.size}`);
+
+    // 3. 地理定位每个唯一 IP（缓存）
+    const geoMap = new Map();
+    await Promise.all([...allIps].map(async (ip) => {
+      geoMap.set(ip, await geoip(ip));
+    }));
+
+    // 4. 裂变命名
+    const list = [];
+    (proxies || []).forEach((p = {}) => {
+      const ips = p._resolved_ips;
+      if (Array.isArray(ips) && ips.length > 0) {
+        const seen = new Set();
+        const nodeIps = [];
+        ips.forEach(({ result }) => {
+          (result || []).forEach((ip) => {
+            if (!seen.has(ip)) { seen.add(ip); nodeIps.push(ip); }
+          });
+        });
+        nodeIps.forEach((ip, i) => {
+          const geo = geoMap.get(ip) || {};
+          let prefix;
+          if (geo.city && geo.operator) {
+            // 入口命名：城市首字 + 运营商首字（如 深圳电信 → 深电）
+            prefix = (geo.city[0] || '') + (geo.operator[0] || '');
+          } else {
+            // 兜底：EDNS 线路名（单线路全称，多线路首字）
+            const lines = ipLines.get(ip) || [];
+            prefix = lines.length === 1 ? lines[0] : lines.map((n) => n[0]).join('/');
+          }
+          list.push({ ...p, name: `${prefix} ${i + 1} - ${p.name}`, server: ip });
+        });
+        // 可选：保留原始域名节点
+        // list.push({ ...p, name: `原始 - ${p.name}`, server: p._domain });
+      } else {
+        list.push(p);
+      }
+    });
+
+    log(`operator done, output=${list.length}`);
+    return list;
+  } catch (e) {
+    log(`operator ERROR: ${(e && e.stack) || e}`);
+    return proxies || [];
+  }
 }
