@@ -63,24 +63,47 @@ async function operator(proxies, targetPlatform, context) {
     return data;
   };
 
+  // 通用 JSON HTTP 请求：兼容 $substore.http.get 与 $httpClient.get 两种 API
+  const fetchJson = async (url) => {
+    try {
+      if (typeof $substore !== 'undefined' && $substore && $substore.http && $substore.http.get) {
+        const res = await $substore.http.get({ url, timeout: 6000 });
+        if (res) {
+          if (typeof res.body === 'string') return JSON.parse(res.body);
+          if (res.body !== undefined) return res.body;
+          if (res.data !== undefined) return res.data;
+        }
+      }
+    } catch (e) {}
+    try {
+      if (typeof $httpClient !== 'undefined' && $httpClient && $httpClient.get) {
+        const res = await $httpClient.get(url, { timeout: 6000 });
+        if (res) {
+          if (res.data !== undefined) return res.data;
+          if (typeof res.body === 'string') return JSON.parse(res.body);
+        }
+      }
+    } catch (e) {}
+    return null;
+  };
+
+  const log = (msg) => {
+    try { if (typeof $substore !== 'undefined' && $substore && $substore.info) $substore.info(msg); } catch (e) {}
+  };
+
   // IP 地理定位（ip-api.com，返回中文 city + 英文 isp）
   const geoip = async (ip) => {
     const cached = cacheGet('geo:' + ip);
     if (cached) return cached;
     let city = '', operator = '';
     try {
-      if (typeof $substore !== 'undefined' && $substore && $substore.http) {
-        const res = await $substore.http.get({
-          url: `http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,message,regionName,city,isp,as`,
-          timeout: 6000,
-        });
-        const data = JSON.parse(res.body);
-        if (data && data.status === 'success') {
-          city = data.city || data.regionName || '';
-          operator = mapIsp(data.isp || '');
-        }
+      const data = await fetchJson(`http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,message,regionName,city,isp,as`);
+      if (data && data.status === 'success') {
+        city = data.city || data.regionName || '';
+        operator = mapIsp(data.isp || '');
       }
     } catch (e) {}
+    log(`geoip ${ip} => city=${city || '?'} operator=${operator || '?'}`);
     const geo = { city, operator };
     cacheSet('geo:' + ip, geo);
     return geo;
