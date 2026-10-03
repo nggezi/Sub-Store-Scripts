@@ -19,8 +19,6 @@ scripts/<中文脚本名>/
 ## 3. script.js 代码规范
 
 - 入口固定：`async function operator(proxies, targetPlatform, context) { ... }`，返回 `proxies` 数组。
-- 可调变量与开关集中在脚本**顶部 `CONFIG` 对象**里，方便统一修改；运行时可用 `$arguments` 覆盖。
-- 关键逻辑写中文注释，说明「为什么这么做」，便于日后维护。
 - 参数从 `$arguments` 读取（对应 Sub-Store 的「键/值」），不硬编码；敏感映射一律走参数。
 - 引用 Sub-Store 全局变量（`$arguments`、`$content` 等）前用 `typeof x !== "undefined"` 守卫，避免未定义报错导致脚本整体失效。
 - 输入解析要容错：忽略空行、`#` 注释、缩进、首尾引号。
