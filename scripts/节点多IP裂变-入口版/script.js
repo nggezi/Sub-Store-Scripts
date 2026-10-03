@@ -49,6 +49,70 @@ async function operator(proxies = [], targetPlatform, context) {
     return '';
   };
 
+  // 直辖市：用省份字段 regionName 判断，避免北京抓到「海淀」这类区名
+  const MUNICIPALITY = [
+    [/北京|Beijing/i, '京'],
+    [/上海|Shanghai/i, '沪'],
+    [/天津|Tianjin/i, '津'],
+    [/重庆|Chongqing/i, '渝'],
+  ];
+
+  // 主要城市简称/别称
+  const CITY_ALIAS = [
+    [/广州|Guangzhou/i, '穗'],
+    [/深圳|Shenzhen/i, '深'],
+    [/成都|Chengdu/i, '蓉'],
+    [/武汉|Wuhan/i, '汉'],
+    [/南京|Nanjing/i, '宁'],
+    [/杭州|Hangzhou/i, '杭'],
+    [/西安|Xi'?an/i, '安'],
+    [/沈阳|Shenyang/i, '沈'],
+    [/哈尔滨|Harbin/i, '哈'],
+    [/济南|Jinan/i, '济'],
+    [/青岛|Qingdao/i, '青'],
+    [/大连|Dalian/i, '连'],
+    [/郑州|Zhengzhou/i, '郑'],
+    [/长沙|Changsha/i, '长'],
+    [/福州|Fuzhou/i, '榕'],
+    [/厦门|Xiamen/i, '厦'],
+    [/昆明|Kunming/i, '昆'],
+    [/南宁|Nanning/i, '邕'],
+    [/海口|Haikou/i, '海'],
+    [/温州|Wenzhou/i, '温'],
+    [/宁波|Ningbo/i, '甬'],
+    [/苏州|Suzhou/i, '苏'],
+    [/无锡|Wuxi/i, '锡'],
+    [/佛山|Foshan/i, '佛'],
+    [/东莞|Dongguan/i, '莞'],
+    [/珠海|Zhuhai/i, '珠'],
+    [/合肥|Hefei/i, '肥'],
+    [/太原|Taiyuan/i, '并'],
+    [/石家庄|Shijiazhuang/i, '石'],
+    [/南昌|Nanchang/i, '昌'],
+    [/贵阳|Guiyang/i, '贵'],
+    [/兰州|Lanzhou/i, '兰'],
+    [/乌鲁木齐|Urumqi/i, '乌'],
+    [/呼和浩特|Hohhot/i, '呼'],
+    [/拉萨|Lhasa/i, '拉'],
+    [/西宁|Xining/i, '西'],
+    [/银川|Yinchuan/i, '银'],
+    [/烟台|Yantai/i, '烟'],
+    [/唐山|Tangshan/i, '唐'],
+    [/洛阳|Luoyang/i, '洛'],
+    [/常州|Changzhou/i, '常'],
+    [/徐州|Xuzhou/i, '徐'],
+    [/泉州|Quanzhou/i, '泉'],
+    [/佛山|Foshan/i, '佛'],
+  ];
+
+  // 取城市别称：直辖市优先看 regionName，其他看 city，都没有就用首字
+  const cityAlias = (city, region) => {
+    if (region) { for (const [re, alias] of MUNICIPALITY) { if (re.test(region)) return alias; } }
+    if (city) { for (const [re, alias] of CITY_ALIAS) { if (re.test(city)) return alias; } }
+    return (city || region || '')[0] || '';
+  };
+
+
   const cache = scriptResourceCache;
   const cacheGet = (k) => { try { return cache.get(k); } catch (e) { return undefined; } };
   const cacheSet = (k, v) => { try { cache.set(k, v); } catch (e) {} };
@@ -118,16 +182,17 @@ async function operator(proxies = [], targetPlatform, context) {
   const geoip = async (ip) => {
     const cached = cacheGet('geo:' + ip);
     if (cached) return cached;
-    let city = '', operator = '';
+    let city = '', region = '', operator = '';
     try {
       const data = await fetchJson(`http://ip-api.com/json/${ip}?lang=zh-CN&fields=status,message,regionName,city,isp,as`);
       if (data && data.status === 'success') {
-        city = data.city || data.regionName || '';
+        city = data.city || '';
+        region = data.regionName || '';
         operator = mapIsp(data.isp || '');
       }
     } catch (e) {}
-    log(`geoip ${ip} => city=${city || '?'} operator=${operator || '?'}`);
-    const geo = { city, operator };
+    log(`geoip ${ip} => city=${city || '?'} region=${region || '?'} operator=${operator || '?'}`);
+    const geo = { city, region, operator };
     cacheSet('geo:' + ip, geo);
     return geo;
   };
@@ -183,9 +248,10 @@ async function operator(proxies = [], targetPlatform, context) {
         nodeIps.forEach((ip, i) => {
           const geo = geoMap.get(ip) || {};
           let prefix;
-          if (geo.city && geo.operator) {
-            // 入口命名：城市首字 + 运营商首字（如 深圳电信 → 深电）
-            prefix = (geo.city[0] || '') + (geo.operator[0] || '');
+          const c = cityAlias(geo.city, geo.region);
+          if (c && geo.operator) {
+            // 入口命名：城市别称 + 运营商首字（如 广州电信 → 穗电、北京电信 → 京电）
+            prefix = c + (geo.operator[0] || '');
           } else {
             // 兜底：EDNS 线路名（单线路全称，多线路首字）
             const lines = ipLines.get(ip) || [];
