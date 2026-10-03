@@ -53,10 +53,23 @@ async function operator(proxies, targetPlatform, context) {
   proxies.forEach((p = {}) => {
     const ips = p._resolved_ips;
     if (Array.isArray(ips) && ips.length > 0) {
-      ips.forEach(({ name, ip, result }) => {
-        result.forEach((server, index) => {
-          list.push({ ...p, name: `${name} ${index + 1} - ${p.name}`, server });
+      // 按 IP 合并：同一个 IP 被多条线路解析出来时，合并成一个节点，
+      // 前缀用「/」连接线路名（如 电信+联通 → 电/联）。
+      const order = [];        // 唯一 IP 的出现顺序
+      const names = new Map(); // ip -> [线路名...]
+      ips.forEach(({ name, result }) => {
+        (result || []).forEach((ip) => {
+          if (!names.has(ip)) {
+            names.set(ip, []);
+            order.push(ip);
+          }
+          const arr = names.get(ip);
+          if (!arr.includes(name)) arr.push(name);
         });
+      });
+      order.forEach((ip, i) => {
+        const prefix = names.get(ip).join('/');
+        list.push({ ...p, name: `${prefix} ${i + 1} - ${p.name}`, server: ip });
       });
       // 可选：保留原始域名节点
       // list.push({ ...p, name: `原始 - ${p.name}`, server: p._domain });
