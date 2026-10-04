@@ -33,7 +33,9 @@
 | `internal` | `auto` | `#internal` / `#internal=false` | 归属地数据源。`auto` 优先本地 GeoIP 库、缺库自动回退在线；`true` 强制本地；`false` 强制在线 IP 库（ip-api.com） |
 | `dns4` | `Ali` | `#dns4=Google` | 步骤 3（IPv4 解析）的 DNS 提供方 |
 | `dns6` | `Ali` | `#dns6=Cloudflare` | 步骤 4（IPv6 解析）的 DNS 提供方 |
-| `dnsUrl` | `''` | `#dnsUrl=https://dns.alidns.com/dns-query` | `provider=Custom` 时的 DNS 地址，多个用换行分隔 |
+| `dnsUrl` | 多厂商 DoH | `#dnsUrl=https://dns.alidns.com/dns-query` | `provider=Custom` 时的 DNS 地址，多个用换行分隔（`%0A`） |
+| `http_meta_host` | `127.0.0.1` | `#http_meta_host=192.168.1.100` | http-meta 服务地址 |
+| `http_meta_port` | `9876` | `#http_meta_port=9999` | http-meta 服务端口 |
 | `retries` | `1` | `#retries=2` | 每个检测请求的重试次数 |
 | `timeout` | `1999` | `#timeout=3000` | 每个检测请求的超时（毫秒） |
 

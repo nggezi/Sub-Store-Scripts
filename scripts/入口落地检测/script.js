@@ -3,19 +3,19 @@
  * ------------------------------------------------------------------
  * 把 Sub-Store「处理」配置 entrance-geo-test-http-meta.json 脚本化：
  * 用官方脚本 API ProxyUtils.process 在一个脚本里跑完整条 process[] 链，
- * 处理链结构与导入那份 JSON 一致（默认 DNS 提供方改为国内 Ali，见 CONFIG 注释），
+ * 处理链结构与导入那份 JSON 一致（默认 DNS 改为多厂商 DoH 并发、filter 改为 disabled 保留解析失败节点，见 CONFIG 注释），
  * 但可以托管到 GitHub、贴脚本链接直接用。
  *
  * 处理链（11 步，顺序不能改）：
  *   1. 快速设置      udp/tfo/skip-cert-verify 置 ENABLED
  *   2. 正则筛选      丢掉 `#` / `//` 开头的注释行
- *   3. 域名解析      解析 IPv4（provider 默认 Ali，可用 #dns4 换）
- *   4. 域名解析      解析 IPv6，filter=IPOnly 只留已成 IP 的节点（provider 默认 Ali，可用 #dns6 换）
+ *   3. 域名解析      解析 IPv4（provider 默认 Custom 多厂商 DoH，可用 #dns4 换）
+ *   4. 域名解析      解析 IPv6，filter=disabled 保留解析失败的节点（provider 默认 Custom，可用 #dns6 换）
  *   5. 去重          按 server+port+type 去重，清掉 _geo/_entrance
  *   6. 落地检测      xream http_meta_geo.js（经 http-meta 查出口 IP 归属）
  *   7. 入口检测      xream entrance.js（查节点服务器 IP 归属）
- *   8. 脚本筛选      只保留 _geo && _entrance 都拿到的节点
- *   9. 重命名        `🇺🇸 aso ➮ 🇯🇵 aso [type]`，入口=落地时只留落地
+ *   8. 脚本筛选      保留所有节点（解析失败或检测失败的也保留）
+ *   9. 重命名        有检测信息就改名，没有就保持原名字
  *  10. 排序          按名称升序
  *  11. 重名加角标    重名节点追加 ⁰¹²³… 上标
  *
@@ -39,35 +39,38 @@ async function operator(proxies = [], targetPlatform, context) {
     // 对应两份源 JSON：true ≈ -internal-geoip，false ≈ entrance-geo-test-http-meta
     internal: 'auto',
     // 域名解析的 DNS 服务提供方，可选 Ali / Tencent / Google / Cloudflare / Custom / IP-API
-    // 默认 Ali（223.6.6.6，国内直连可达）。
+    // 默认 Custom + 多个 DoH 并发（避免单厂商被 ban）
     // 源 JSON 用的是 Google + Cloudflare，国内不通会让域名节点被 filter=IPOnly 静默丢掉，
     // 所以这里换了默认值；要还原源 JSON 行为用 #dns4=Google&dns6=Cloudflare
-    dns4: 'Ali',
-    dns6: 'Ali',
-    // provider=Custom 时的 DoH/DoT/UDP 地址，多个用换行分隔；仅 provider 为 Custom 时生效
-    dnsUrl: '',
+    dns4: 'Custom',
+    dns6: 'Custom',
+    // provider=Custom 时的 DoH 地址，多个用换行分隔，Sub-Store 会并发查询
+    dnsUrl: 'https://dns.alidns.com/dns-query\nhttps://dns.google/dns-query\nhttps://cloudflare-dns.com/dns-query\nhttps://doh.pub/dns-query\nhttps://dns.quad9.net/dns-query',
     retries: '1',
     timeout: '1999',
   }
   // ========================================================================
 
   const args = typeof $arguments !== 'undefined' && $arguments ? $arguments : {}
+  const dnsUrl = args.dnsUrl === undefined ? CONFIG.dnsUrl : String(args.dnsUrl)
   const rawInternal = args.internal === undefined ? CONFIG.internal : args.internal
-  const internal = resolveInternal(rawInternal, ProxyUtils)
+
+  // hasLocalGeoip 会读 MMDB 文件（~11MB），只调一次，结果复用
+  const localGeoip = hasLocalGeoip(ProxyUtils)
+  const internal = resolveInternal(rawInternal, localGeoip)
   const retries = args.retries === undefined ? CONFIG.retries : String(args.retries)
   const timeout = args.timeout === undefined ? CONFIG.timeout : String(args.timeout)
 
   // DNS provider 必须先校验：ResolveDomainOperator 的工厂函数会直接 throw，
   // 而那个 throw 发生在 process 循环里，会把整条链炸掉而不是跳过单步
-  const dns4 = resolveDnsProvider(args.dns4, CONFIG.dns4, 'IPv4', args.dnsUrl, CONFIG.dnsUrl)
-  const dns6 = resolveDnsProvider(args.dns6, CONFIG.dns6, 'IPv6', args.dnsUrl, CONFIG.dnsUrl)
-  const dnsUrl = args.dnsUrl === undefined ? CONFIG.dnsUrl : String(args.dnsUrl)
+  const dns4 = resolveDnsProvider(args.dns4, CONFIG.dns4, 'IPv4', dnsUrl)
+  const dns6 = resolveDnsProvider(args.dns6, CONFIG.dns6, 'IPv6', dnsUrl)
 
   // 让用户在日志里确认这次实际走了哪套数据源
   console.log(`[SCOPE] INFO: 归属地数据源 = ${internal ? '本地 GeoIP 库' : '在线 IP 库'}（internal=${rawInternal}）`);
   // 强制 internal 但库其实不可用：下游 entrance.js 的 valid 校验会让所有节点缺 _entrance，
   // 步骤 8 全部筛掉，表现为「订阅变空」。这里先把原因喊出来，免得用户查半天。
-  if (internal && rawInternal !== 'auto' && !hasLocalGeoip()) {
+  if (internal && rawInternal !== 'auto' && !hasLocalGeoip(ProxyUtils)) {
     console.error('[SCOPE] ERROR: 已强制 internal 但本地 GeoIP 库不可用（MMDB 路径未配置或文件缺失），' +
       '入口检测将全部失败导致输出为空；请配置 SUB_STORE_MMDB_COUNTRY_PATH / SUB_STORE_MMDB_ASN_PATH，或去掉 #internal 改用在线库');
   }
@@ -79,7 +82,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const metaHost = args.http_meta_host === undefined ? '127.0.0.1' : String(args.http_meta_host)
   const metaPort = args.http_meta_port === undefined ? '9876' : String(args.http_meta_port)
   const metaOk = await probeHttpMeta(metaHost, metaPort, timeout)
-  const entranceOk = internal ? hasLocalGeoip(ProxyUtils) : true
+  const entranceOk = internal ? localGeoip : true
   if (!metaOk) {
     console.error(`[SCOPE] ERROR: http-meta 不可达（${metaHost}:${metaPort}），落地检测会全部失败。` +
       '请启动 http-meta（Docker 版需带 http-meta tag 的镜像），否则将降级为只用入口信息');
@@ -91,9 +94,11 @@ async function operator(proxies = [], targetPlatform, context) {
 
   // 落地检测：经 http-meta 起核心，用节点出口访问 IP 查询接口
   // internal 时响应视为纯文本 IP，改由本地 GeoIP 库解析（默认接口换为 checkip.amazonaws.com）
+  // http_meta_host/port 可自定义 http-meta 地址（默认 127.0.0.1:9876）
   const geoUrl =
     'https://raw.githubusercontent.com/xream/scripts/main/surge/modules/sub-store-scripts/' +
-    `check/http_meta_geo.js#${internal ? 'internal&' : ''}geo&retries=${retries}&timeout=${timeout}&cache`
+    `check/http_meta_geo.js#${internal ? 'internal&' : ''}geo&retries=${retries}&timeout=${timeout}&cache` +
+    `&http_meta_host=${metaHost}&http_meta_port=${metaPort}`
 
   // 入口检测：直接查节点服务器 IP 的归属，不经代理
   // internal 时用 GeoIP 库离线解析，省掉一次 HTTP 请求
@@ -122,14 +127,15 @@ async function operator(proxies = [], targetPlatform, context) {
     // 丢掉注释行（`# xxx` / `// xxx`），它们不是节点
     { type: 'Regex Filter', args: { keep: false, regex: ['^(#|\\/\\/)'] } },
     // 域名节点先解析成 IP：入口检测要拿 IP 才能查归属
+    // filter=disabled 不过滤，解析失败的域名节点保留（mihomo 连接时会自己解析）
     {
       type: 'Resolve Domain Operator',
       args: { provider: dns4, type: 'IPv4', filter: 'disabled', cache: 'enabled', url: dnsUrl },
     },
-    // 再补一轮 IPv6；filter=IPOnly 把仍没解析出 IP 的域名节点筛掉
+    // 再补一轮 IPv6；filter=disabled 不过滤
     {
       type: 'Resolve Domain Operator',
-      args: { provider: dns6, type: 'IPv6', filter: 'IPOnly', cache: 'enabled', url: dnsUrl },
+      args: { provider: dns6, type: 'IPv6', filter: 'disabled', cache: 'enabled', url: dnsUrl },
     },
     // 同 server+port+type 视为重复节点，只留第一条
     { type: 'Script Operator', args: { mode: 'script', content: DEDUP_SCRIPT } },
@@ -159,26 +165,19 @@ async function operator(proxies = [], targetPlatform, context) {
   const withEntrance = out.filter((p) => p._entrance).length
   console.log(`[SCOPE] INFO: 检测结果 —— 落地 ${withGeo}/${total}，入口 ${withEntrance}/${total}`)
 
-  // 两项全废时绝不返回空列表：把节点原样留着也比订阅变空有用，用户至少知道该去查日志
-  if (total > 0 && withGeo === 0 && withEntrance === 0) {
-    console.error('[SCOPE] ERROR: 入口与落地检测全部失败，跳过改名直接返回节点（避免输出空订阅）')
-    return out
+  // 步骤 8 保留所有节点，重命名脚本根据 _geo/_entrance 决定改名策略
+  // 这里只需要日志提示单边失败
+  if (withGeo === 0 && total > 0) {
+    console.error('[SCOPE] ERROR: 落地检测全部失败，节点将只显示入口信息或原名字')
   }
-
-  // 按实际拿到的数据决定筛选条件，单边失败就降级而不是全丢
-  let filter = 'return $server._geo && $server._entrance'
-  if (withGeo === 0) {
-    filter = 'return !!$server._entrance'
-    console.error('[SCOPE] ERROR: 落地检测全部失败，降级为「只用入口信息」改名')
-  } else if (withEntrance === 0) {
-    filter = 'return !!$server._geo'
-    console.error('[SCOPE] ERROR: 入口检测全部失败，降级为「只用落地信息」改名')
+  if (withEntrance === 0 && total > 0) {
+    console.error('[SCOPE] ERROR: 入口检测全部失败，节点将只显示落地信息或原名字')
   }
 
   const POST = [
-    // 两项都测到的才留；单边失败时按上面的降级条件放行
-    { type: 'Script Filter', args: { mode: 'script', content: filter } },
-    // 重命名（RENAME 内部会判断 _geo/_entrance 谁缺失，缺哪边就只显示另一边）
+    // 保留所有节点：解析失败或检测失败的节点也保留，重命名脚本会根据 _geo/_entrance 决定改名策略
+    { type: 'Script Filter', args: { mode: 'script', content: 'return true' } },
+    // 重命名（RENAME 内部会判断 _geo/_entrance 谁缺失，缺哪边就只显示另一边，都没有就保持原名字）
     { type: 'Script Operator', args: { mode: 'script', content: RENAME } },
     // 按名称升序，让重名节点挨在一起
     { type: 'Sort Operator', args: 'asc' },
@@ -199,10 +198,9 @@ async function probeHttpMeta(host, port, timeout) {
   try {
     const $ = typeof $substore !== 'undefined' ? $substore : null
     if (!$ || !$.http || typeof $.http.get !== 'function') return true
-    const t = parseFloat(timeout)
     await $.http.get({
       url: `http://${host}:${port}/`,
-      timeout: Number.isFinite(t) && t > 0 ? Math.min(t, 3000) : 2000,
+      timeout: Math.min(parseFloat(timeout) || 2000, 3000),
     })
     return true
   } catch (e) {
@@ -214,11 +212,12 @@ async function probeHttpMeta(host, port, timeout) {
 //   不传 / 'auto' -> 自动探测，本地库可用就用本地，否则回退在线
 //   '#internal' 或 '#internal=true' -> 强制本地库
 //   '#internal=false' -> 强制在线库
-function resolveInternal(value, ProxyUtils) {
+// localGeoip 由调用方传入，避免重复读 MMDB 文件
+function resolveInternal(value, localGeoip) {
   if (value === undefined || value === null || value === '' || String(value).toLowerCase() === 'auto') {
-    return hasLocalGeoip(ProxyUtils);
+    return localGeoip
   }
-  return toBool(value);
+  return toBool(value)
 }
 
 // 本地 GeoIP 库是否真的可用。三处都会用到它，必须和下游脚本的判断保持一致：
@@ -265,7 +264,7 @@ function hasLocalGeoip(ProxyUtils) {
 // 本脚本的 async function operator 只是被声明、从不被调用，结果原样返回节点：
 // 日志里有一行 error，但输出看起来完全正常，等于整条链静默不执行。
 // 所以参数写错只能记日志 + 回退，让处理链继续跑。
-function resolveDnsProvider(value, dft, type, urlValue, urlDft) {
+function resolveDnsProvider(value, dft, type, url) {
   const provider = String(value === undefined ? dft : value).trim()
   const known = ['Custom', 'Google', 'IP-API', 'Cloudflare', 'Ali', 'Tencent']
   const fallback = (why) => {
@@ -278,7 +277,7 @@ function resolveDnsProvider(value, dft, type, urlValue, urlDft) {
   if (provider === 'IP-API' && type === 'IPv6') {
     return fallback('DNS 提供方 IP-API 不支持解析 IPv6')
   }
-  if (provider === 'Custom' && !String(urlValue === undefined ? urlDft : urlValue).trim()) {
+  if (provider === 'Custom' && !String(url || '').trim()) {
     return fallback('provider 为 Custom 时必须提供 dnsUrl（#dnsUrl=https://dns.alidns.com/dns-query）')
   }
   return provider
@@ -315,8 +314,8 @@ const DEDUP_SCRIPT = `function operator(proxies = []) {
 `
 
 // 在线 IP 库（ip-api.com）：country 为国家名，isp 为运营商
-// 三分支兜底：两边都有 → 正常「入口 ➮ 落地」；只有一边 → 只显示有的那边（降级时用）
-const RENAME_ONLINE = "\nconst { _entrance, _geo } = $server\nconst flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\nlet name\nif (_geo && _entrance) {\n  name = (_entrance.isp !== _geo.isp || _entrance.country !== _geo.country) ? `${flag(_entrance.country)} ${_entrance.isp} ➮ ${flag(_geo.country)} ${_geo.isp} [${$server.type}]` : `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n} else if (_geo) {\n  name = `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n} else {\n  name = `${flag(_entrance.country)} ${_entrance.isp} [${$server.type}]`\n}\n$server.name = name\ndelete $server._entrance\ndelete $server._geo"
+// 四分支兜底：两边都有 → 正常「入口 ➮ 落地」；只有一边 → 只显示有的那边；都没有 → 保持原名字
+const RENAME_ONLINE = "\nconst { _entrance, _geo } = $server\nif (!_geo && !_entrance) {\n  // 没有检测信息，保持原名字\n} else {\n  const flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\n  let name\n  if (_geo && _entrance) {\n    name = (_entrance.isp !== _geo.isp || _entrance.country !== _geo.country) ? `${flag(_entrance.country)} ${_entrance.isp} ➮ ${flag(_geo.country)} ${_geo.isp} [${$server.type}]` : `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n  } else if (_geo) {\n    name = `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n  } else {\n    name = `${flag(_entrance.country)} ${_entrance.isp} [${$server.type}]`\n  }\n  $server.name = name\n}\ndelete $server._entrance\ndelete $server._geo"
 
 // 内置 GeoIP 库：countryCode 为国家码，aso 为运营商/ASN 名
-const RENAME_INTERNAL = "\nconst { _entrance, _geo } = $server\nconst flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\nlet name\nif (_geo && _entrance) {\n  name = (_entrance.aso !== _geo.aso || _entrance.countryCode !== _geo.countryCode) ? `${flag(_entrance.countryCode)} ${_entrance.aso} ➮ ${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]` : `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n} else if (_geo) {\n  name = `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n} else {\n  name = `${flag(_entrance.countryCode)} ${_entrance.aso} [${$server.type}]`\n}\n$server.name = name\ndelete $server._entrance\ndelete $server._geo"
+const RENAME_INTERNAL = "\nconst { _entrance, _geo } = $server\nif (!_geo && !_entrance) {\n  // 没有检测信息，保持原名字\n} else {\n  const flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\n  let name\n  if (_geo && _entrance) {\n    name = (_entrance.aso !== _geo.aso || _entrance.countryCode !== _geo.countryCode) ? `${flag(_entrance.countryCode)} ${_entrance.aso} ➮ ${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]` : `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n  } else if (_geo) {\n    name = `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n  } else {\n    name = `${flag(_entrance.countryCode)} ${_entrance.aso} [${$server.type}]`\n  }\n  $server.name = name\n}\ndelete $server._entrance\ndelete $server._geo"
