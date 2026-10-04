@@ -55,13 +55,39 @@
 - **重名判定**：步骤 11 按**改名后**的 `name` 判重，追加上标且不加连接符（`link` 为空）。
 - **未命中不改写**：解析不到、检测失败的节点不会被硬改名，而是直接被筛掉。
 
+### 降级策略（重要）
+
+脚本分三段执行（预处理 → 检测 → 后处理），中间统计检测成功率，**任何一边全失败都不会输出空订阅**：
+
+| 场景 | 行为 | 日志 |
+| --- | --- | --- |
+| http-meta 不可达 | 跳过落地检测，只用入口信息改名 | `http-meta 不可达（127.0.0.1:9876）…` |
+| 本地 GeoIP 库不可用 | 跳过入口检测，只用落地信息改名 | `MMDB 不可用（…），回退在线库` |
+| 两边都失败 | 跳过改名，返回原节点 | `入口与落地检测全部失败…` |
+| 单边部分失败 | 按原版行为丢弃失败节点 | `检测结果 —— 落地 X/Y，入口 Z/W` |
+
+降级时节点名只有单边信息（如 `🇺🇸 ISP-1 [ss]`，没有 `➮`），便于识别。
+
+> **为什么需要降级**：Sub-Store 的 `ApplyOperator` 会捕获脚本异常并回退到 `nodeFunc`（快捷脚本形式），而本脚本的 `async function operator` 在那种包装下**只是被声明、从不被调用**，结果原样返回节点——日志里只有一行 error，输出看起来完全正常。所以检测失败不能靠抛错表达，只能靠计数 + 降级。
+
 ### 运行前提
 
 1. **只适用于 Node.js / Docker 版**。步骤 6 的 `http_meta_geo.js` 会连本地 http-meta，而且它的 `/start` 调用没有 try/catch——App 版（Surge/Loon）没有 http-meta，整条链会直接报错。App 版请用 xream 的 [`geo.js`](https://zhetengsha.eu.org/blog/posts/1269)（经代理发请求，无需 http-meta），那是另一条链。
-2. **需要本地跑 [http-meta](https://github.com/xream/http-meta)**，默认 `127.0.0.1:9876`。Docker 版用带 `http-meta` tag 的镜像（`xream/sub-store:http-meta`）即内置，端口默认无需配置；没跑会报 `HTTP META 启动失败`。
+2. **需要本地跑 [http-meta](https://github.com/xream/http-meta)**，默认 `127.0.0.1:9876`。Docker 版用带 `http-meta` tag 的镜像（`xream/sub-store:http-meta`）即内置，端口默认无需配置。**如果日志出现 `http-meta 不可达`，说明它没在运行**——脚本会降级为只用入口信息，不会输出空订阅，但落地信息会缺失。
 3. **用本地 GeoIP 库时**：Node.js 版设 `SUB_STORE_MMDB_COUNTRY_PATH` / `SUB_STORE_MMDB_ASN_PATH`（country 和 asn **两个都要**，否则重名改名会缺字段）；代理 App 版需 `$utils.geoip` / `$utils.ipaso`（Surge、Loon build ≥ 692）。
 4. **Node.js 版需设置 `SUB_STORE_FRONTEND_BACKEND_PATH`**，否则脚本操作不生效（Sub-Store 通用要求）。
 5. 两个检测脚本都会发外部请求，节点多时较慢；已开 `cache`，可在前端配缓存 TTL，或用定时同步（`SUB_STORE_BACKEND_SYNC_CRON`）预热缓存，避免白天手动拉取超时。
+
+### 日志
+
+脚本用 `[SCOPE]` 前缀输出日志，便于在 Sub-Store 日志页筛选：
+
+```
+[SCOPE] INFO: 归属地数据源 = 本地 GeoIP 库（internal=auto）
+[SCOPE] INFO: 检测结果 —— 落地 12/12，入口 12/12
+```
+
+异常时会有 `[SCOPE] ERROR:` 说明原因和修复方向。
 
 ## 脚本位置
 
