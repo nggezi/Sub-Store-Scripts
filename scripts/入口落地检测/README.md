@@ -1,6 +1,6 @@
 # 入口落地检测
 
-把两份「入口 & 落地 检测」处理配置（`entrance-geo-test-http-meta*.json`）脚本化成一个 `script.js`：用 Sub-Store 官方脚本 API `ProxyUtils.process` 在脚本里跑完整条处理链，效果与导入 JSON 配置一致，但可以托管到 GitHub、在脚本操作里直接贴链接。
+把两份「入口 & 落地 检测」处理配置（`source/entrance-geo-test-http-meta*.json`）脚本化成一个 `script.js`：用 Sub-Store 官方脚本 API `ProxyUtils.process` 在脚本里跑完整条处理链，效果与导入 JSON 配置一致，但可以托管到 GitHub、在脚本操作里直接贴链接。
 
 默认 `internal=auto`——**有本地 GeoIP 库就用本地库，缺库自动回退在线 ip-api**，不用手动选。
 
@@ -114,4 +114,4 @@ https://raw.githubusercontent.com/nggezi/Sub-Store-Scripts/main/scripts/入口�
 .../script.js#dns4=Custom&dnsUrl=https://dns.alidns.com/dns-query
 ```
 
-同目录下的 `entrance-geo-test-http-meta.json` 与 `entrance-geo-test-http-meta-internal-geoip.json` 是本脚本的源配置，需要导入式用法时仍可直接导入 Sub-Store。
+`source/` 目录下的 `entrance-geo-test-http-meta.json` 与 `entrance-geo-test-http-meta-internal-geoip.json` 是本脚本的源配置，需要导入式用法时仍可直接导入 Sub-Store。
