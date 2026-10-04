@@ -48,6 +48,9 @@ async function operator(proxies = [], targetPlatform, context) {
     dnsUrl: 'https://dns.alidns.com/dns-query\nhttps://dns.google/dns-query\nhttps://cloudflare-dns.com/dns-query\nhttps://doh.pub/dns-query\nhttps://dns.quad9.net/dns-query',
     retries: '1',
     timeout: '1999',
+    // 是否在输出前把 server 还原成原始域名（默认 true）
+    // 解析成功的节点 server 会被替换成 IP，原域名保存在 _domain；开启后还原
+    restoreDomain: true,
   }
   // ========================================================================
 
@@ -60,6 +63,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const internal = resolveInternal(rawInternal, localGeoip)
   const retries = args.retries === undefined ? CONFIG.retries : String(args.retries)
   const timeout = args.timeout === undefined ? CONFIG.timeout : String(args.timeout)
+  const restoreDomain = args.restore_domain === undefined ? CONFIG.restoreDomain : toBool(args.restore_domain)
 
   // DNS provider 必须先校验：ResolveDomainOperator 的工厂函数会直接 throw，
   // 而那个 throw 发生在 process 循环里，会把整条链炸掉而不是跳过单步
@@ -187,6 +191,17 @@ async function operator(proxies = [], targetPlatform, context) {
       args: { action: 'rename', position: 'back', template: '⁰ ¹ ² ³ ⁴ ⁵ ⁶ ⁷ ⁸ ⁹', link: '' },
     },
   ]
+
+  // 还原域名（如果开启）：解析成功的节点 server 被替换成 IP，这里还原成原始域名
+  if (restoreDomain) {
+    POST.push({
+      type: 'Script Operator',
+      args: {
+        mode: 'script',
+        content: 'if ($server._domain) { $server.server = $server._domain; delete $server._domain }',
+      },
+    })
+  }
 
   return await run(POST, out)
 }

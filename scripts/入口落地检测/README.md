@@ -36,6 +36,7 @@
 | `dnsUrl` | 多厂商 DoH | `#dnsUrl=https://dns.alidns.com/dns-query` | `provider=Custom` 时的 DNS 地址，多个用换行分隔（`%0A`） |
 | `http_meta_host` | `127.0.0.1` | `#http_meta_host=192.168.1.100` | http-meta 服务地址 |
 | `http_meta_port` | `9876` | `#http_meta_port=9999` | http-meta 服务端口 |
+| `restore_domain` | `true` | `#restore_domain=false` | 输出前把 `server` 还原成原始域名（解析成功的节点 `server` 会被替换成 IP，原域名保存在 `_domain`） |
 | `retries` | `1` | `#retries=2` | 每个检测请求的重试次数 |
 | `timeout` | `1999` | `#timeout=3000` | 每个检测请求的超时（毫秒） |
 
