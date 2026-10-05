@@ -200,6 +200,11 @@ async function operator(proxies = [], targetPlatform, context) {
   try {
     log(`operator start, proxies=${(proxies || []).length}, edns lines=${CONFIG.edns.length}, dohs=${(CONFIG.dohs || []).length}, retries=${CONFIG.resolveRetries}`);
 
+    // 本次运行真正解析过的节点集合：只有它们才允许走裂变分支。
+    // 不能只看 p._resolved_ips 是否存在——上游脚本（或历史残留）可能把该字段
+    // 留在一个 server 已是 IP 的节点上，盲信会把 IP 节点误当域名节点再裂变一次。
+    const resolvedNow = new Set();
+
     // 1. 解析所有域名节点：按 resolveLimit 控制并发，单节点内多条 EDNS 线路并发。
     await mapLimit(proxies || [], CONFIG.resolveLimit, async (p) => {
       if (p && p.server && !ProxyUtils.isIP(p.server)) {
@@ -207,6 +212,7 @@ async function operator(proxies = [], targetPlatform, context) {
         p._resolved_ips = await Promise.all(
           CONFIG.edns.map(({ ip, name }) => resolve(p.server, { ip, name }))
         );
+        resolvedNow.add(p);
       }
     });
 
@@ -214,7 +220,8 @@ async function operator(proxies = [], targetPlatform, context) {
     const list = [];
     (proxies || []).forEach((p = {}) => {
       const ips = p._resolved_ips;
-      if (Array.isArray(ips) && ips.length > 0) {
+      // 只有本次真正解析过的节点才裂变；其余（含 server 已是 IP 的）原样保留
+      if (resolvedNow.has(p) && Array.isArray(ips) && ips.length > 0) {
         // 按 IP 合并：同一个 IP 被多条线路解析出来时，合并成一个节点，
         // 前缀用「/」连接线路名首字（如 电信+联通 → 电/联）。
         const order = [];        // 唯一 IP 的出现顺序

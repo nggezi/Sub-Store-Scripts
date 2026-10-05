@@ -1,0 +1,243 @@
+// 本地 mock 测试台：加载仓库里 4 个脚本，注入假的 Sub-Store 运行时，验证行为。
+// 运行：node _tests/run.js
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const ROOT = path.join(__dirname, '..');
+let pass = 0, fail = 0;
+const results = [];
+function check(name, cond, extra) {
+  if (cond) { pass++; results.push('  OK   ' + name); }
+  else { fail++; results.push('  FAIL ' + name + (extra ? '  -> ' + extra : '')); }
+}
+
+// 载入某个脚本的 operator 函数：在文件末尾追加 `this.__op = operator`，
+// 不改变脚本自身的函数声明方式（改声明为表达式会破坏其返回行为）。
+function loadOperator(rel) {
+  const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  return src + '\n; this.__op = operator;';
+}
+
+function makeProxyUtils(over = {}) {
+  const base = {
+    isIP: (s) => /^(\d{1,3}\.){3}\d{1,3}$/.test(String(s || '')) || /^[0-9a-f:]+$/i.test(String(s || '')) && String(s || '').includes(':'),
+    doh: async () => ({ answers: [] }),
+    getFlag: (cc) => (cc ? '[flag:' + cc + ']' : ''),
+    process: async (list) => list,
+    MMDB: function MMDB() { return { geoip: () => ({}), ipaso: () => ({}) }; },
+  };
+  return Object.assign(base, over);
+}
+
+// 在沙箱里跑 operator(...)
+async function runScript(rel, { proxies, args, utils, substore, cache, httpClient, options }) {
+  const code = loadOperator(rel);
+  const sandbox = {
+    console,
+    setTimeout,
+    clearTimeout,
+    ProxyUtils: utils,
+    $arguments: args,
+    $substore: substore,
+    $httpClient: httpClient,
+    $utils: undefined,
+    $options: options,
+    scriptResourceCache: cache,
+  };
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(code, sandbox, { filename: rel });
+  const opFn = sandbox.__op;
+  return await opFn(proxies, 'ClashMeta', { source: undefined, raw: undefined });
+}
+
+(async () => {
+  // ---------------- 入口版：核心 bug 场景 ----------------
+  {
+    // DoH 全失败（限速）时：应保留原名、且不泄漏 _domain/_resolved_ips
+    const utils = makeProxyUtils({ doh: async () => { throw new Error('HTTP/2: headers timeout'); } });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: '香港 A01', type: 'vless', server: 'hk01.alilago.org', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Prime Security Corp.","country":"香港","countryCode":"HK"}' }) } },
+      cache: new Map(),
+    });
+    const n = out[0];
+    check('入口版: DoH全失败仍输出1条', out.length === 1, JSON.stringify(out));
+    check('入口版: DoH全失败保留原名', n && n.name === '香港 A01', n && n.name);
+    check('入口版: 不泄漏 _domain', n && !('_domain' in n), Object.keys(n || {}).join(','));
+    check('入口版: 不泄漏 _resolved_ips', n && !('_resolved_ips' in n), Object.keys(n || {}).join(','));
+  }
+
+  {
+    // DoH 解析出 1 个海外 IP，geoip 成功 -> 命名「香港119」之类；且字段不泄漏
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '27.44.143.211' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: '香港 A01', type: 'vless', server: 'hk01.alilago.org', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Prime Security Corp.","country":"香港","countryCode":"HK"}' }) } },
+      cache: new Map(),
+    });
+    const n = out[0];
+    check('入口版: 海外按 国家+IP首段 命名', n && /^香港27/.test(n.name), n && n.name);
+    check('入口版: server 换成 IP', n && n.server === '27.44.143.211', n && n.server);
+    check('入口版: 输出不泄漏内部字段', n && !('_domain' in n) && !('_resolved_ips' in n), Object.keys(n || {}).join(','));
+  }
+
+  {
+    // 国内 IP + 命中 ispMap -> 运营商+IP首段
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '119.36.124.169' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'trojan', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"China Unicom","country":"中国","countryCode":"CN"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: 国内命中运营商 -> 联通119', out[0] && out[0].name === '联通119 - X', out[0] && out[0].name);
+  }
+
+  {
+    // 多线路同 IP -> 合并一条，不重复
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '1.2.3.4' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'vmess', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"China Mobile","country":"中国","countryCode":"CN"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: 三线路同IP合并为1条', out.length === 1, 'len=' + out.length);
+  }
+
+  {
+    // server 已是 IP：应原样保留，即使带 stale _resolved_ips 也不应误裂变
+    const utils = makeProxyUtils();
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'orig', type: 'ss', server: '27.44.143.211', port: 443, _domain: 'hk01.alilago.org', _resolved_ips: [{ name: '移动', result: ['9.9.9.9'] }] }],
+      args: {},
+      utils,
+      substore: { info: () => {} },
+      cache: new Map(),
+    });
+    const n = out[0];
+    check('入口版: server已是IP原样保留(不误裂变)', out.length === 1 && n.server === '27.44.143.211', 'len=' + out.length + ' server=' + (n && n.server));
+    check('入口版: IP节点剥离stale内部字段', n && !('_domain' in n) && !('_resolved_ips' in n), Object.keys(n || {}).join(','));
+  }
+
+  // ---------------- 节点多IP裂变（EDNS 命名版） ----------------
+  {
+    const utils = makeProxyUtils({ doh: async (o) => ({ answers: [{ type: 'A', data: o.edns === '111.47.229.151' ? '10.0.0.1' : '10.0.0.2' }] }) });
+    const out = await runScript('scripts/节点多IP裂变/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {} },
+      cache: new Map(),
+    });
+    check('裂变: 两个不同IP -> 2条', out.length === 2, 'len=' + out.length + ' ' + JSON.stringify(out));
+    check('裂变: 命名用线路首字', Array.isArray(out) && out.every((n) => /^[移电联]/.test(n.name)), JSON.stringify(out));
+    check('裂变: 不泄漏内部字段', Array.isArray(out) && out.every((n) => !('_domain' in n) && !('_resolved_ips' in n)), JSON.stringify(out));
+  }
+  {
+    // 同IP被三线路命中 -> 合并成一条，前缀 移/电/联
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '10.0.0.9' }] }) });
+    const out = await runScript('scripts/节点多IP裂变/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {} },
+      cache: new Map(),
+    });
+    check('裂变: 三线路同IP合并为1条', out.length === 1, 'len=' + out.length);
+    check('裂变: 合并前缀 移/电/联', out[0] && out[0].name === '移/电/联 - X', out[0] && out[0].name);
+  }
+
+  // ---------------- mihomo 域名替换 ----------------
+  {
+    const utils = makeProxyUtils();
+    const txt = '# comment\nexample.com: node1.example.net\nfoo.bar :   baz.qux\nhosts:\n\n"quoted.com": "q.net"\n';
+    const out = await runScript('scripts/mihomo节点域名替换/script.js', {
+      proxies: [
+        { name: 'a', server: 'example.com', port: 1 },
+        { name: 'b', server: 'foo.bar', port: 2 },
+        { name: 'c', server: 'quoted.com', port: 3 },
+        { name: 'd', server: 'untouched.com', port: 4 },
+      ],
+      args: txt,
+      utils,
+      substore: {},
+      cache: new Map(),
+    });
+    check('mihomo: 命中替换', Array.isArray(out) && out[0] && out[0].server === 'node1.example.net' && out[1].server === 'baz.qux', JSON.stringify(out));
+    check('mihomo: 引号键替换', Array.isArray(out) && out[2] && out[2].server === 'q.net', JSON.stringify(out));
+    check('mihomo: 未命中原样', Array.isArray(out) && out[3] && out[3].server === 'untouched.com', JSON.stringify(out));
+  }
+  {
+    const utils = makeProxyUtils();
+    let out, err = '';
+    try {
+      out = await runScript('scripts/mihomo节点域名替换/script.js', {
+        proxies: [{ name: 'a', server: 'example.com', port: 1 }],
+        args: '',
+        utils,
+        substore: {},
+        cache: new Map(),
+      });
+    } catch (e) { err = e && e.stack; }
+    check('mihomo: 空参数原样返回', Array.isArray(out) && out[0] && out[0].server === 'example.com', err || JSON.stringify(out));
+  }
+
+  // ---------------- 入口落地检测（rename，不改）: 只做 smoke ----------------
+  {
+    const utils = makeProxyUtils({ process: async (list) => list });
+    let ok = true, err = '';
+    try {
+      await runScript('scripts/入口落地检测/script.js', {
+        proxies: [{ name: '香港 A01', type: 'vless', server: 'hk01.alilago.org', port: 443 }],
+        args: {},
+        utils,
+        substore: { info: () => {}, http: { get: async () => ({ body: 'ok' }) } },
+        cache: new Map(),
+        options: {},
+      });
+    } catch (e) { ok = false; err = e && e.message; }
+    check('入口落地检测: smoke 不抛错', ok, err);
+  }
+
+  // ---------------- 回归：Script Filter/Operator 的 content 必须是完整函数定义 ----------------
+  // Sub-Store 用 dh(name, content) 拼成 new Function(..., content + " return name")，
+  // 因此 content 必须是 `function filter(...){...}` / `async function operator(...){...}` 源码；
+  // 写成 `return true` 之类的裸语句会提前 return 出非函数值并抛
+  // `TypeError: dh(...) is not a function`，导致整步被丢弃。
+  {
+    function dh(name, script) {
+      const params = ['$arguments', '$options', '$substore', 'lodash', 'ProxyUtils', 'yaml', 'Buffer', 'b64d', 'b64e', 'DOMAIN_RESOLVERS', 'scriptResourceCache', 'flowUtils', 'produceArtifact', 'require'];
+      return new Function(...params, `${script}\n return ${name}`)({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, undefined);
+    }
+    const src = fs.readFileSync(path.join(ROOT, 'scripts/入口落地检测/script.js'), 'utf8');
+    const m = src.match(/type:\s*'Script Filter'[\s\S]*?content:\s*'([^']*(?:\\'[^']*)*)'/);
+    check('入口落地检测: 找到 Script Filter step', !!m, 'regex miss');
+    if (m) {
+      const content = m[1].replace(/\\'/g, "'");
+      let fn, err = '';
+      try { fn = dh('filter', content); } catch (e) { err = e.message; }
+      check('入口落地检测: Script Filter content 编译为函数', typeof fn === 'function', err || ('typeof=' + typeof fn));
+      if (typeof fn === 'function') {
+        const input = [{ name: 'a' }, { name: 'b' }];
+        let kept;
+        try { kept = await fn(input, 'ClashMeta', {}); } catch (e) { err = e.message; }
+        check('入口落地检测: Script Filter 保留全部节点', Array.isArray(kept) && kept.length === 2, err || ('len=' + (kept && kept.length)));
+      }
+    }
+    check('入口落地检测: 不再含裸 return true 过滤器', !/content:\s*'return true'/.test(src), 'still has return true');
+    check('入口落地检测: entranceUrl 不含 remove_failed', !/entrance\.js#[^']*remove_failed/.test(src), 'still remove_failed');
+  }
+
+  console.log(results.join('\n'));
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+})();

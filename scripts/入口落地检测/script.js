@@ -106,9 +106,12 @@ async function operator(proxies = [], targetPlatform, context) {
 
   // 入口检测：直接查节点服务器 IP 的归属，不经代理
   // internal 时用 GeoIP 库离线解析，省掉一次 HTTP 请求
+  // ⚠️ 不加 remove_failed：加上它会把入口检测失败的节点直接删掉，
+  //    与第 8 步「保留所有节点」和重命名的四分支兜底（缺哪边显示哪边）相矛盾，
+  //    表现为订阅里节点莫名变少。保留节点，让 RENAME 按 _geo 单边命名。
   const entranceUrl =
     'https://raw.githubusercontent.com/xream/scripts/main/surge/modules/sub-store-scripts/' +
-    `check/entrance.js#${internal ? 'internal&' : ''}entrance&cache&incompatible&remove_failed` +
+    `check/entrance.js#${internal ? 'internal&' : ''}entrance&cache&incompatible` +
     `&retries=${retries}&timeout=${timeout}`
 
   // 重命名取的字段两套接口不一样：ip-api 给 country/isp，GeoIP 库给 countryCode/aso
@@ -179,8 +182,15 @@ async function operator(proxies = [], targetPlatform, context) {
   }
 
   const POST = [
-    // 保留所有节点：解析失败或检测失败的节点也保留，重命名脚本会根据 _geo/_entrance 决定改名策略
-    { type: 'Script Filter', args: { mode: 'script', content: 'return true' } },
+    // 保留所有节点：解析失败或检测失败的节点也保留，重命名脚本会根据 _geo/_entrance 决定改名策略。
+    // 注意 Script Filter 的 script 模式 content 必须是**完整的 filter 函数定义**
+    // （Sub-Store 用 dh("filter", content) 拼成 new Function(..., content + " return filter")，
+    //  只会把它当函数体求值），写成 `return true` 会得到非函数值并抛
+    //  TypeError: dh(...) is not a function，整步被丢弃。
+    {
+      type: 'Script Filter',
+      args: { mode: 'script', content: 'async function filter(input = [], targetPlatform, context) { return input }' },
+    },
     // 重命名（RENAME 内部会判断 _geo/_entrance 谁缺失，缺哪边就只显示另一边，都没有就保持原名字）
     { type: 'Script Operator', args: { mode: 'script', content: RENAME } },
     // 按名称升序，让重名节点挨在一起
