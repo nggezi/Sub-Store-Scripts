@@ -266,10 +266,21 @@ function hasLocalGeoip(ProxyUtils) {
     /* $utils 未定义时 typeof 不会抛，这里兜个底 */
   }
   // Node.js 版：country 和 asn 两个库都得在，否则重名改名时会缺字段
+  // 探针 IP 不能用 1.1.1.1：它是 Cloudflare 任播地址，GeoLite2-Country 里只有
+  // registeredCountry 没有 country，geoip() 会返回 undefined，造成「好库被误判为坏库」。
+  // 这里轮询几个 host 段稳定、必然有 country 记录的 IP，任一命中即认为库可用。
+  const PROBE_IPS = ['8.8.8.8', '114.114.114.114', '223.5.5.5'];
   try {
     const mmdb = new ProxyUtils.MMDB();
-    const country = mmdb && mmdb.geoip('1.1.1.1');
-    const asn = mmdb && mmdb.ipaso('1.1.1.1');
+    let country = undefined;
+    let asn = undefined;
+    for (const ip of PROBE_IPS) {
+      const c = mmdb && mmdb.geoip(ip);
+      const a = mmdb && mmdb.ipaso(ip);
+      if (c) country = country || c;
+      if (a) asn = asn || a;
+      if (country && asn) break;
+    }
     if (!country || !asn) {
       console.error(`[SCOPE] ERROR: MMDB 文件存在但查询失败（geoip=${country}, ipaso=${asn}），回退在线库`);
     }

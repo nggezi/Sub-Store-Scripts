@@ -235,6 +235,39 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
     }
     check('入口落地检测: 不再含裸 return true 过滤器', !/content:\s*'return true'/.test(src), 'still has return true');
     check('入口落地检测: entranceUrl 不含 remove_failed', !/entrance\.js#[^']*remove_failed/.test(src), 'still remove_failed');
+    // 探针 IP 不能用 1.1.1.1：Cloudflare 任播地址在 GeoLite2-Country 里只有
+    // registeredCountry 没 country，geoip() 返回 undefined，会让好库被误判为坏库。
+    check('入口落地检测: GeoIP 探针不用 1.1.1.1', !/geoip\(\s*'1\.1\.1\.1'\s*\)/.test(src), 'still probes 1.1.1.1');
+    // 模拟「好库」：8.8.8.8 有记录，1.1.1.1 无记录。探针修复后应判定库可用（internal=true）。
+    {
+      const goodUtils = makeProxyUtils({
+        process: async (list) => list,
+        MMDB: function MMDB() {
+          return {
+            geoip: (ip) => (ip === '1.1.1.1' ? undefined : 'US'),
+            ipaso: (ip) => (ip === '1.1.1.1' ? undefined : 'Google LLC'),
+          };
+        },
+      });
+      let sawLocal = '';
+      const origLog = console.log;
+      const origErr = console.error;
+      console.log = (...a) => { sawLocal += a.join(' '); };
+      console.error = () => {};
+      try {
+        await runScript('scripts/入口落地检测/script.js', {
+          proxies: [{ name: 'x', type: 'vless', server: '1.2.3.4', port: 443 }],
+          args: {},
+          utils: goodUtils,
+          substore: { info: () => {}, http: { get: async () => ({ body: 'ok' }) } },
+          cache: new Map(),
+          options: {},
+        });
+      } catch (e) { /* smoke */ }
+      console.log = origLog;
+      console.error = origErr;
+      check('入口落地检测: 好库(仅非任播IP有记录)判定为可用', /本地 GeoIP 库/.test(sawLocal), sawLocal.slice(0, 160));
+    }
   }
 
   console.log(results.join('\n'));
