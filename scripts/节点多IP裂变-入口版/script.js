@@ -20,7 +20,9 @@
  *   - 解析失败不抛错，会回退保留原节点；地理定位失败则回退用 EDNS 线路名命名；
  *   - 解析用「多 DoH 源轮询 + 失败换源重试 + 连续失败线性退避」，缓解单源被限速；
  *   - 解析/地理定位都做了并发限制，避免一次性打爆 DoH 或 ip-api 被限速；
- *   - 所有可调项集中在下方 CONFIG，运行时也可用脚本参数覆盖。
+ *   - 所有可调项集中在下方 CONFIG，运行时也可用脚本参数覆盖；
+ *   - 缓存：解析结果与归属地都走 Sub-Store 的 scriptResourceCache（key 带版本号，升级可整体作废）；
+ *     若以 mode=link 方式引入本脚本，可在链接后加 #noCache 让 Sub-Store 每次都重新拉取脚本内容（不吃脚本下载缓存）。
  */
 async function operator(proxies = [], targetPlatform, context) {
   // ==================== 配置区（按需修改） ====================
@@ -125,7 +127,27 @@ async function operator(proxies = [], targetPlatform, context) {
   };
 
   // 取 IP 第一段：IPv4 取第一段数字（119.36.x.x → 119），IPv6 取第一组。
-  const firstSeg = (ip) => (ip || '').split(/[.:]/)[0] || '';
+  // IPv6 首组是 16 进制串（2001），直接拼接无意义，这里返回空串让前缀退化为运营商/国家。
+  const firstSeg = (ip) => {
+    const s = String(ip || '');
+    if (s.includes(':')) return '';
+    return s.split('.')[0] || '';
+  };
+
+  // 国家码 → 中文常用名。ip-api 的 lang=zh-CN 偶尔仍返回英文 country 名，
+  // 命中此表时用中文兜底，避免命名中英混杂（如「United States119」）。
+  const COUNTRY_CN = {
+    CN: '中国', HK: '香港', TW: '台湾', MO: '澳门', JP: '日本', KR: '韩国', SG: '新加坡',
+    US: '美国', GB: '英国', DE: '德国', FR: '法国', NL: '荷兰', RU: '俄罗斯', CA: '加拿大',
+    AU: '澳大利亚', IN: '印度', TH: '泰国', VN: '越南', MY: '马来西亚', ID: '印度尼西亚',
+    PH: '菲律宾', TR: '土耳其', BR: '巴西', IT: '意大利', ES: '西班牙', SE: '瑞典',
+    CH: '瑞士', AE: '阿联酋', SA: '沙特', IL: '以色列', MX: '墨西哥',
+  };
+  const countryCN = (country, code) => {
+    // 已经是中文（含非 ASCII）就原样返回
+    if (country && /[^\x00-\x7F]/.test(country)) return country;
+    return (code && COUNTRY_CN[code]) || country || '';
+  };
 
   // 生成节点名前缀。优先级：
   //   1) 国内（countryCode=CN）且命中 ispMap → 运营商 + IP 首段（如 电信119）
@@ -134,7 +156,8 @@ async function operator(proxies = [], targetPlatform, context) {
   const buildPrefix = (ip, geo, lines) => {
     const seg = firstSeg(ip);
     if (geo && geo.operator && geo.countryCode === 'CN') return geo.operator + seg;
-    if (geo && geo.country) return geo.country + seg;
+    const cn = countryCN(geo && geo.country, geo && geo.countryCode);
+    if (cn) return cn + seg;
     if (!lines || lines.length === 0) return seg;
     if (lines.length === 1) return lines[0];
     // 多条线路取首字并去重（避免「移动/电信」这类同首字重复）
@@ -170,15 +193,28 @@ async function operator(proxies = [], targetPlatform, context) {
   };
 
   // 退避等待：连续解析失败后插入一段 sleep，缓解被限速。
+  // 计数**按 DoH 源**分桶：并发解析多个节点时，各源互不干扰，
+  // 一个坏域名/坏源不会把其它源的成功计数清零、也不会误触退避。
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  let failStreak = 0;   // 连续失败计数（跨节点累计）
-  let backoffRound = 0; // 已退避轮次，用于线性放大等待
-  const backoff = async () => {
+  const srcState = new Map(); // url -> { failStreak, backoffRound }
+  const srcOf = (url) => {
+    let s = srcState.get(url);
+    if (!s) { s = { failStreak: 0, backoffRound: 0 }; srcState.set(url, s); }
+    return s;
+  };
+  const onResolveOk = (url) => {
+    const s = srcOf(url);
+    s.failStreak = 0;
+    s.backoffRound = 0;
+  };
+  const onResolveFail = async (url) => {
+    const s = srcOf(url);
+    s.failStreak += 1;
     if (!CONFIG.resolveBackoffMs || !CONFIG.resolveBackoffAfter) return;
-    if (failStreak < CONFIG.resolveBackoffAfter) return;
-    backoffRound += 1;
-    const wait = CONFIG.resolveBackoffMs * backoffRound;
-    log(`rate-limit backoff: sleep ${wait}ms (failStreak=${failStreak}, round=${backoffRound})`);
+    if (s.failStreak < CONFIG.resolveBackoffAfter) return;
+    s.backoffRound += 1;
+    const wait = CONFIG.resolveBackoffMs * s.backoffRound;
+    log(`rate-limit backoff: sleep ${wait}ms @ ${url} (failStreak=${s.failStreak}, round=${s.backoffRound})`);
     await sleep(wait);
   };
 
@@ -196,7 +232,8 @@ async function operator(proxies = [], targetPlatform, context) {
   // 多源轮询：一个源失败自动换下一个源重试；全失败才返回空结果（不抛错）。
   const resolve = async (domain, { name, ip }) => {
     // 缓存 key 只跟域名/类型/线路有关，与具体 DoH 源无关（换个源结果应一致）。
-    const id = `doh:${domain}:${CONFIG.type}:${name}:${ip}`;
+    // 带版本号（DOH_CACHE_VER）：旧版脚本写入的缓存结构与新版不兼容时，升版即可整体作废。
+    const id = `doh:v2:${domain}:${CONFIG.type}:${name}:${ip}`;
     const cached = cacheGet(id);
     if (cached) return cached;
 
@@ -215,17 +252,15 @@ async function operator(proxies = [], targetPlatform, context) {
         // data 可能是字符串或数组，flat 展平后去重，再过滤非法值。
         result = [...new Set(result.flat())].filter((x) => ProxyUtils.isIP(x));
         if (result.length === 0) throw new Error('No valid IP');
-        // 成功：清空失败计数
-        failStreak = 0;
-        backoffRound = 0;
+        // 成功：清空该源的失败计数
+        onResolveOk(url);
         const data = { ip, name, result };
         cacheSet(id, data);
         return data;
       } catch (e) {
-        // 该源失败，先做退避再试下一个源
-        failStreak += 1;
+        // 该源失败，按源累计并可能退避，再试下一个源
         log(`resolve ${domain} via ${name || '?'} @ ${url} failed: ${(e && e.message) || e}`);
-        await backoff();
+        await onResolveFail(url);
       }
     }
     // 所有源都失败
@@ -260,9 +295,14 @@ async function operator(proxies = [], targetPlatform, context) {
   // 只缓存成功结果（失败不缓存，避免一次网络抖动把该 IP 永久钉死在空结果上）。
   //   operator：命中 ispMap 的国内运营商中文名（海外/未命中为空）；
   //   country/countryCode：国家中文名 + 二字母码（lang=zh-CN，如 新加坡/SG、美国/US）。
+  // 缓存 key 带版本号（GEO_CACHE_VER）：旧版脚本写入的 geo 缓存（如只有 operator 字段的
+  // 空壳）与新版结构不兼容，升版即可整体作废旧缓存，避免「旧坏缓存永远生效」。
+  const GEO_CACHE_VER = 'geo:v2:';
   const geoip = async (ip) => {
-    const cached = cacheGet('geo:' + ip);
-    if (cached) return cached;
+    const key = GEO_CACHE_VER + ip;
+    const cached = cacheGet(key);
+    // 命中且结构完整（含 countryCode 字段）才复用；否则视为无效缓存，重新查询并覆盖。
+    if (cached && cached.countryCode !== undefined) return cached;
     let operator = '';
     let country = '';
     let countryCode = '';
@@ -279,7 +319,7 @@ async function operator(proxies = [], targetPlatform, context) {
     log(`geoip ${ip} => operator=${operator || '?'}, country=${country || '?'}(${countryCode || '?'})`);
     const geo = { operator, country, countryCode };
     // 只有查到了国家/地区（能用于命名）才写缓存；完全失败下次重试。
-    if (ok) cacheSet('geo:' + ip, geo);
+    if (ok) cacheSet(key, geo);
     return geo;
   };
 
@@ -350,8 +390,8 @@ async function operator(proxies = [], targetPlatform, context) {
           const newName = CONFIG.seq ? `${prefix} ${i + 1} - ${p.name}` : `${prefix} - ${p.name}`;
           list.push({ ...base(p), name: newName, server: ip });
         });
-        // 可选：额外保留一条原始域名节点
-        if (CONFIG.keepOriginal) list.push({ ...base(p), name: `原始 - ${p.name}`, server: p._domain });
+        // 可选：额外保留一条原始域名节点（_domain 一定存在，这里再兜一层）
+        if (CONFIG.keepOriginal && p._domain) list.push({ ...base(p), name: `原始 - ${p.name}`, server: p._domain });
       } else {
         // 无解析结果 / server 本身是 IP → 原样保留
         list.push(base(p));

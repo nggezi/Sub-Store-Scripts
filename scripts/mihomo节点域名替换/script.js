@@ -26,8 +26,11 @@ async function operator(proxies, targetPlatform, context) {
   // 无有效映射表时原样返回，避免误改。
   if (Object.keys(hosts).length === 0) return proxies || [];
 
+  // 返回新对象而不是原地改 p：上游/下游步骤可能共享同一引用，原地改会连带影响别处。
   return (proxies || []).map((p) => {
-    if (p && p.server && hosts[p.server] != null) p.server = hosts[p.server];
+    if (p && p.server && Object.prototype.hasOwnProperty.call(hosts, p.server)) {
+      return { ...p, server: hosts[p.server] };
+    }
     return p;
   });
 }
@@ -53,7 +56,8 @@ function extractHostsText(arg) {
 
 // 解析 hosts 文本：每行 `key: value`，忽略空行与 `#` 注释。
 function parseHosts(text) {
-  const hosts = {};
+  // 用无原型对象，避免 server 恰好是 `__proto__` / `constructor` 时命中原型链被误改。
+  const hosts = Object.create(null);
   for (const line of String(text || '').split(/\r?\n/)) {
     const t = line.trim();
     if (!t || t.startsWith('#')) continue;

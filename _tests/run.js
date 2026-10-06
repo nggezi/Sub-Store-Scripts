@@ -88,6 +88,24 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
   }
 
   {
+    // 旧版脚本可能在缓存里写入「只有 operator 字段的空壳」geo（无 countryCode）。
+    // 新版 geoip 必须识别为无效缓存并重新查询，否则命名会永远回退成线路名。
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '27.44.143.211' }] }) });
+    const dirtyCache = new Map();
+    dirtyCache.set('geo:27.44.143.211', { operator: '' }); // 旧格式脏缓存
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: '香港 A01', type: 'vless', server: 'hk01.alilago.org', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Prime Security Corp.","country":"香港","countryCode":"HK"}' }) } },
+      cache: dirtyCache,
+    });
+    const n = out[0];
+    check('入口版: 旧格式脏geo缓存不被复用(仍按真实查询命名)', n && /^香港27/.test(n.name), n && n.name);
+    check('入口版: 新版geo缓存key带版本前缀', [...dirtyCache.keys()].some((k) => k === 'geo:v2:27.44.143.211'), [...dirtyCache.keys()].join(','));
+  }
+
+  {
     // 国内 IP + 命中 ispMap -> 运营商+IP首段
     const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '119.36.124.169' }] }) });
     const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
@@ -126,6 +144,44 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
     const n = out[0];
     check('入口版: server已是IP原样保留(不误裂变)', out.length === 1 && n.server === '27.44.143.211', 'len=' + out.length + ' server=' + (n && n.server));
     check('入口版: IP节点剥离stale内部字段', n && !('_domain' in n) && !('_resolved_ips' in n), Object.keys(n || {}).join(','));
+  }
+
+  {
+    // 海外 IP，但 ip-api 返回英文 country（"United States"）+ countryCode US
+    // -> 应用中文兜底表，命名「美国8」而不是「United States8」
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '8.8.8.8' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Google LLC","country":"United States","countryCode":"US"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: 英文国家名兜底成中文(美国8)', out[0] && out[0].name === '美国8 - X', out[0] && out[0].name);
+  }
+  {
+    // 国内未命中运营商 + 有国家 -> 中国+首段（不因 operator 为空而丢国家）
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '111.13.1.1' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Some ISP","country":"中国","countryCode":"CN"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: 国内未命中运营商 -> 中国111', out[0] && out[0].name === '中国111 - X', out[0] && out[0].name);
+  }
+  {
+    // IPv6 解析：firstSeg 不产出 16 进制串，前缀退化为「国家/地区」
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '2001:db8::1' }] }) });
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: { type: 'AAAA' },
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Google LLC","country":"United States","countryCode":"US"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: IPv6 不复用首段(前缀=国家)', out[0] && out[0].name === '美国 - X', out[0] && out[0].name);
   }
 
   // ---------------- 节点多IP裂变（EDNS 命名版） ----------------
@@ -189,6 +245,35 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
       });
     } catch (e) { err = e && e.stack; }
     check('mihomo: 空参数原样返回', Array.isArray(out) && out[0] && out[0].server === 'example.com', err || JSON.stringify(out));
+  }
+  {
+    // 原型污染防护：server 恰为 __proto__ / constructor 时不应被原型链命中
+    const utils = makeProxyUtils();
+    const out = await runScript('scripts/mihomo节点域名替换/script.js', {
+      proxies: [
+        { name: 'a', server: '__proto__', port: 1 },
+        { name: 'b', server: 'constructor', port: 2 },
+        { name: 'c', server: 'toString', port: 3 },
+      ],
+      args: 'normal.com: node1.net',
+      utils,
+      substore: {},
+      cache: new Map(),
+    });
+    check('mihomo: 原型键不被误改', Array.isArray(out) && out[0].server === '__proto__' && out[1].server === 'constructor' && out[2].server === 'toString', JSON.stringify(out));
+  }
+  {
+    // 不可变：命中替换时返回新对象，不原地改输入
+    const utils = makeProxyUtils();
+    const input = [{ name: 'a', server: 'example.com', port: 1 }];
+    const out = await runScript('scripts/mihomo节点域名替换/script.js', {
+      proxies: input,
+      args: 'example.com: node1.example.net',
+      utils,
+      substore: {},
+      cache: new Map(),
+    });
+    check('mihomo: 命中替换不原地改输入', input[0].server === 'example.com' && out[0].server === 'node1.example.net' && out[0] !== input[0], 'in=' + input[0].server + ' out=' + out[0].server);
   }
 
   // ---------------- 入口落地检测（rename，不改）: 只做 smoke ----------------

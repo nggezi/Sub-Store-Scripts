@@ -18,7 +18,9 @@
  *   - 解析失败不抛错，会回退保留原节点；
  *   - 解析用「多 DoH 源轮询 + 失败换源重试 + 连续失败线性退避」，缓解单源被限速；
  *   - 解析做了并发限制，避免一次性打爆 DoH 被限速；
- *   - 所有可调项集中在下方 CONFIG，运行时也可用脚本参数覆盖。
+ *   - 所有可调项集中在下方 CONFIG，运行时也可用脚本参数覆盖；
+ *   - 缓存：解析结果走 Sub-Store 的 scriptResourceCache（key 带版本号，升级可整体作废）；
+ *     若以 mode=link 方式引入本脚本，可在链接后加 #noCache 让 Sub-Store 每次都重新拉取脚本内容（不吃脚本下载缓存）。
  */
 async function operator(proxies = [], targetPlatform, context) {
   // ==================== 配置区（按需修改） ====================
@@ -121,15 +123,28 @@ async function operator(proxies = [], targetPlatform, context) {
   };
 
   // 退避等待：连续解析失败后插入一段 sleep，缓解被限速。
+  // 计数**按 DoH 源**分桶：并发解析多个节点时，各源互不干扰，
+  // 一个坏域名/坏源不会把其它源的成功计数清零、也不会误触退避。
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  let failStreak = 0;   // 连续失败计数（跨节点累计）
-  let backoffRound = 0; // 已退避轮次，用于线性放大等待
-  const backoff = async () => {
+  const srcState = new Map(); // url -> { failStreak, backoffRound }
+  const srcOf = (url) => {
+    let s = srcState.get(url);
+    if (!s) { s = { failStreak: 0, backoffRound: 0 }; srcState.set(url, s); }
+    return s;
+  };
+  const onResolveOk = (url) => {
+    const s = srcOf(url);
+    s.failStreak = 0;
+    s.backoffRound = 0;
+  };
+  const onResolveFail = async (url) => {
+    const s = srcOf(url);
+    s.failStreak += 1;
     if (!CONFIG.resolveBackoffMs || !CONFIG.resolveBackoffAfter) return;
-    if (failStreak < CONFIG.resolveBackoffAfter) return;
-    backoffRound += 1;
-    const wait = CONFIG.resolveBackoffMs * backoffRound;
-    log(`rate-limit backoff: sleep ${wait}ms (failStreak=${failStreak}, round=${backoffRound})`);
+    if (s.failStreak < CONFIG.resolveBackoffAfter) return;
+    s.backoffRound += 1;
+    const wait = CONFIG.resolveBackoffMs * s.backoffRound;
+    log(`rate-limit backoff: sleep ${wait}ms @ ${url} (failStreak=${s.failStreak}, round=${s.backoffRound})`);
     await sleep(wait);
   };
 
@@ -147,7 +162,8 @@ async function operator(proxies = [], targetPlatform, context) {
   // 多源轮询：一个源失败自动换下一个源重试；全失败才返回空结果（不抛错）。
   const resolve = async (domain, { name, ip }) => {
     // 缓存 key 只跟域名/类型/线路有关，与具体 DoH 源无关（换个源结果应一致）。
-    const id = `doh:${domain}:${CONFIG.type}:${name}:${ip}`;
+    // 带版本号（doh:v2:）：旧版脚本写入的缓存结构与新版不兼容时，升版即可整体作废。
+    const id = `doh:v2:${domain}:${CONFIG.type}:${name}:${ip}`;
     const cached = cacheGet(id);
     if (cached) return cached;
 
@@ -166,17 +182,15 @@ async function operator(proxies = [], targetPlatform, context) {
         // data 可能是字符串或数组，flat 展平后去重，再过滤非法值。
         result = [...new Set(result.flat())].filter((x) => ProxyUtils.isIP(x));
         if (result.length === 0) throw new Error('No valid IP');
-        // 成功：清空失败计数
-        failStreak = 0;
-        backoffRound = 0;
+        // 成功：清空该源的失败计数
+        onResolveOk(url);
         const data = { ip, name, result };
         cacheSet(id, data);
         return data;
       } catch (e) {
-        // 该源失败，先做退避再试下一个源
-        failStreak += 1;
+        // 该源失败，按源累计并可能退避，再试下一个源
         log(`resolve ${domain} via ${name || '?'} @ ${url} failed: ${(e && e.message) || e}`);
-        await backoff();
+        await onResolveFail(url);
       }
     }
     // 所有源都失败
@@ -244,8 +258,8 @@ async function operator(proxies = [], targetPlatform, context) {
           const newName = CONFIG.seq ? `${prefix} ${i + 1} - ${p.name}` : `${prefix} - ${p.name}`;
           list.push({ ...cleanNode(p), name: newName, server: ip });
         });
-        // 可选：额外保留一条原始域名节点
-        if (CONFIG.keepOriginal) list.push({ ...cleanNode(p), name: `原始 - ${p.name}`, server: p._domain });
+        // 可选：额外保留一条原始域名节点（_domain 一定存在，这里再兜一层）
+        if (CONFIG.keepOriginal && p._domain) list.push({ ...cleanNode(p), name: `原始 - ${p.name}`, server: p._domain });
       } else {
         // 无解析结果 / server 本身是 IP → 原样保留
         list.push(cleanNode(p));
