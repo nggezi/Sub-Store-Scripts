@@ -45,7 +45,13 @@ async function operator(proxies = [], targetPlatform, context) {
     dns4: 'Custom',
     dns6: 'Custom',
     // provider=Custom 时的 DoH 地址，多个用换行分隔，Sub-Store 会并发查询
-    dnsUrl: 'https://dns.alidns.com/dns-query\nhttps://dns.google/dns-query\nhttps://cloudflare-dns.com/dns-query\nhttps://doh.pub/dns-query\nhttps://dns.quad9.net/dns-query',
+    dnsUrl: [
+      'https://dns.alidns.com/dns-query',
+      'https://dns.google/dns-query',
+      'https://cloudflare-dns.com/dns-query',
+      'https://doh.pub/dns-query',
+      'https://dns.quad9.net/dns-query',
+    ].join('\n'),
     retries: '1',
     timeout: '1999',
     // 是否在输出前把 server 还原成原始域名（默认 true）
@@ -351,7 +357,51 @@ const DEDUP_SCRIPT = `function operator(proxies = []) {
 
 // 在线 IP 库（ip-api.com）：country 为国家名，isp 为运营商
 // 四分支兜底：两边都有 → 正常「入口 ➮ 落地」；只有一边 → 只显示有的那边；都没有 → 保持原名字
-const RENAME_ONLINE = "\nconst { _entrance, _geo } = $server\nif (!_geo && !_entrance) {\n  // 没有检测信息，保持原名字\n} else {\n  const flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\n  let name\n  if (_geo && _entrance) {\n    name = (_entrance.isp !== _geo.isp || _entrance.country !== _geo.country) ? `${flag(_entrance.country)} ${_entrance.isp} ➮ ${flag(_geo.country)} ${_geo.isp} [${$server.type}]` : `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n  } else if (_geo) {\n    name = `${flag(_geo.country)} ${_geo.isp} [${$server.type}]`\n  } else {\n    name = `${flag(_entrance.country)} ${_entrance.isp} [${$server.type}]`\n  }\n  $server.name = name\n}\ndelete $server._entrance\ndelete $server._geo"
+const RENAME_ONLINE = `
+const { _entrance, _geo } = $server
+if (!_geo && !_entrance) {
+  // 没有检测信息，保持原名字
+} else {
+  const flag = (s) => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')
+  let name
+  if (_geo && _entrance) {
+    const both =
+      _entrance.isp !== _geo.isp || _entrance.country !== _geo.country
+    name = both
+      ? \`\${flag(_entrance.country)} \${_entrance.isp} ➮ \${flag(_geo.country)} \${_geo.isp} [\${$server.type}]\`
+      : \`\${flag(_geo.country)} \${_geo.isp} [\${$server.type}]\`
+  } else if (_geo) {
+    name = \`\${flag(_geo.country)} \${_geo.isp} [\${$server.type}]\`
+  } else {
+    name = \`\${flag(_entrance.country)} \${_entrance.isp} [\${$server.type}]\`
+  }
+  $server.name = name
+}
+delete $server._entrance
+delete $server._geo
+`
 
 // 内置 GeoIP 库：countryCode 为国家码，aso 为运营商/ASN 名
-const RENAME_INTERNAL = "\nconst { _entrance, _geo } = $server\nif (!_geo && !_entrance) {\n  // 没有检测信息，保持原名字\n} else {\n  const flag = s => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')\n  let name\n  if (_geo && _entrance) {\n    name = (_entrance.aso !== _geo.aso || _entrance.countryCode !== _geo.countryCode) ? `${flag(_entrance.countryCode)} ${_entrance.aso} ➮ ${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]` : `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n  } else if (_geo) {\n    name = `${flag(_geo.countryCode)} ${_geo.aso} [${$server.type}]`\n  } else {\n    name = `${flag(_entrance.countryCode)} ${_entrance.aso} [${$server.type}]`\n  }\n  $server.name = name\n}\ndelete $server._entrance\ndelete $server._geo"
+const RENAME_INTERNAL = `
+const { _entrance, _geo } = $server
+if (!_geo && !_entrance) {
+  // 没有检测信息，保持原名字
+} else {
+  const flag = (s) => ProxyUtils.getFlag(s || '').replace(/🇹🇼/g, '🇼🇸')
+  let name
+  if (_geo && _entrance) {
+    const both =
+      _entrance.aso !== _geo.aso || _entrance.countryCode !== _geo.countryCode
+    name = both
+      ? \`\${flag(_entrance.countryCode)} \${_entrance.aso} ➮ \${flag(_geo.countryCode)} \${_geo.aso} [\${$server.type}]\`
+      : \`\${flag(_geo.countryCode)} \${_geo.aso} [\${$server.type}]\`
+  } else if (_geo) {
+    name = \`\${flag(_geo.countryCode)} \${_geo.aso} [\${$server.type}]\`
+  } else {
+    name = \`\${flag(_entrance.countryCode)} \${_entrance.aso} [\${$server.type}]\`
+  }
+  $server.name = name
+}
+delete $server._entrance
+delete $server._geo
+`

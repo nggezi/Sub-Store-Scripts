@@ -323,6 +323,50 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
     // 探针 IP 不能用 1.1.1.1：Cloudflare 任播地址在 GeoLite2-Country 里只有
     // registeredCountry 没 country，geoip() 返回 undefined，会让好库被误判为坏库。
     check('入口落地检测: GeoIP 探针不用 1.1.1.1', !/geoip\(\s*'1\.1\.1\.1'\s*\)/.test(src), 'still probes 1.1.1.1');
+    // RENAME 脚本是内联字符串。直接从沙箱求值取真实常量值（正则截原始文本会拿到未反转义的
+    // \` 与 \${），再经 new Function 编译执行，确保多行重排后行为不变。
+    {
+      const sb = {
+        console,
+        setTimeout,
+        clearTimeout,
+        ProxyUtils: makeProxyUtils(),
+        $arguments: {},
+        $substore: { info: () => {}, http: { get: async () => ({ body: 'ok' }) } },
+        $options: {},
+        scriptResourceCache: new Map(),
+      };
+      sb.globalThis = sb;
+      vm.createContext(sb);
+      vm.runInContext(src + '\n; this.__rn = RENAME_ONLINE; this.__ri = RENAME_INTERNAL;', sb);
+      const rn = sb.__rn;
+      const ri = sb.__ri;
+      check('入口落地检测: 取到 RENAME_ONLINE 源码', typeof rn === 'string' && rn.length > 0, typeof rn);
+      check('入口落地检测: 取到 RENAME_INTERNAL 源码', typeof ri === 'string' && ri.length > 0, typeof ri);
+      const runRename = (srcText, proxy) => {
+        // eslint-disable-next-line no-new-func
+        const nodeFn = new Function('$server', 'ProxyUtils', srcText);
+        nodeFn(proxy, makeProxyUtils());
+        return proxy;
+      };
+      const pBoth = runRename(rn, {
+        type: 'vless',
+        _entrance: { country: 'HK', isp: 'EntISP' },
+        _geo: { country: 'JP', isp: 'GeoLanded' },
+      });
+      check(
+        '入口落地检测: RENAME 双边命名',
+        pBoth.name === '[flag:HK] EntISP ➮ [flag:JP] GeoLanded [vless]',
+        pBoth.name
+      );
+      check('入口落地检测: RENAME 清掉 _geo/_entrance', !('_geo' in pBoth) && !('_entrance' in pBoth), Object.keys(pBoth).join(','));
+      const pGeoOnly = runRename(rn, { type: 'trojan', _geo: { country: 'US', isp: 'OnlyGeo' } });
+      check('入口落地检测: RENAME 仅落地侧命名', pGeoOnly.name === '[flag:US] OnlyGeo [trojan]', pGeoOnly.name);
+      const pNone = runRename(rn, { type: 'ss', name: '原名' });
+      check('入口落地检测: RENAME 无检测信息保持原名', pNone.name === '原名', pNone.name);
+      const pInt = runRename(ri, { type: 'vless', _geo: { countryCode: 'sg', aso: 'FooNet' } });
+      check('入口落地检测: RENAME_INTERNAL 按 countryCode/aso 命名', pInt.name === '[flag:sg] FooNet [vless]', pInt.name);
+    }
     // 模拟「好库」：8.8.8.8 有记录，1.1.1.1 无记录。探针修复后应判定库可用（internal=true）。
     {
       const goodUtils = makeProxyUtils({
