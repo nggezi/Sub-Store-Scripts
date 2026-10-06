@@ -219,7 +219,8 @@ async function operator(proxies = [], targetPlatform, context) {
   };
 
   // 从 dohs 列表中选一个起始源，并按 rotate 顺序返回要尝试的源序列。
-  // 用全局游标轮询，让不同解析请求分散到不同源，降低单源压力。
+  // 用游标轮询，让同一次运行内的不同解析请求分散到不同源，降低单源压力。
+  // 注意：游标是函数内局部变量，每次 operator 调用都从 0 开始（不跨次轮询）。
   let dohCursor = 0;
   const dohPlan = () => {
     const list = (CONFIG.dohs && CONFIG.dohs.length) ? CONFIG.dohs : ['https://doh.pub/dns-query'];
