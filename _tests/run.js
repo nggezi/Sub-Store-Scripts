@@ -132,7 +132,7 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
   }
 
   {
-    // server 已是 IP：应原样保留，即使带 stale _resolved_ips 也不应误裂变
+    // server 已是 IP：不误裂变、server 不变；查不到归属时保留原名（此 mock 无 http.get）
     const utils = makeProxyUtils();
     const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
       proxies: [{ name: 'orig', type: 'ss', server: '27.44.143.211', port: 443, _domain: 'hk01.alilago.org', _resolved_ips: [{ name: '移动', result: ['9.9.9.9'] }] }],
@@ -142,8 +142,23 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
       cache: new Map(),
     });
     const n = out[0];
-    check('入口版: server已是IP原样保留(不误裂变)', out.length === 1 && n.server === '27.44.143.211', 'len=' + out.length + ' server=' + (n && n.server));
+    check('入口版: server已是IP不误裂变', out.length === 1 && n.server === '27.44.143.211', 'len=' + out.length + ' server=' + (n && n.server));
+    check('入口版: IP节点查不到归属保留原名', out.length === 1 && n.name === 'orig', 'len=' + out.length + ' name=' + (n && n.name));
     check('入口版: IP节点剥离stale内部字段', n && !('_domain' in n) && !('_resolved_ips' in n), Object.keys(n || {}).join(','));
+  }
+
+  {
+    // server 已是 IP + 查得到归属 -> 按「归属+IP首段 - 原名」改名，server 不变、不裂变
+    const utils = makeProxyUtils();
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'orig', type: 'ss', server: '119.36.124.169', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"China Unicom","country":"中国","countryCode":"CN"}' }) } },
+      cache: new Map(),
+    });
+    check('入口版: IP节点按归属改名(联通119 - orig)', out.length === 1 && out[0].name === '联通119 - orig', 'len=' + out.length + ' name=' + (out[0] && out[0].name));
+    check('入口版: IP节点改名不改server', out.length === 1 && out[0].server === '119.36.124.169', out[0] && out[0].server);
   }
 
   {
@@ -274,6 +289,25 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
       cache: new Map(),
     });
     check('mihomo: 命中替换不原地改输入', input[0].server === 'example.com' && out[0].server === 'node1.example.net' && out[0] !== input[0], 'in=' + input[0].server + ' out=' + out[0].server);
+  }
+  {
+    // 本地 mihomo 配置文件走 main(config)，不能只实现 operator(proxies)。
+    const utils = makeProxyUtils();
+    const out = await runScript('scripts/mihomo节点域名替换/script.js', {
+      proxies: { $content: '', $file: { type: 'mihomoConfig' } },
+      args: { hosts: 'hosts:\n  example.com: node1.example.net' },
+      utils,
+      substore: {},
+      cache: new Map(),
+    });
+    // mock runner 直接执行 operator；用 vm 另取 main 验证文件入口。
+    const fs = require('fs');
+    const src = fs.readFileSync(path.join(ROOT, 'scripts/mihomo节点域名替换/script.js'), 'utf8');
+    const sb = { $arguments: { hosts: 'hosts:\n  example.com: node1.example.net' } };
+    vm.createContext(sb);
+    vm.runInContext(src + '\n; this.__main = main;', sb);
+    const cfg = await sb.__main({ proxies: [{ name: 'a', server: 'example.com', port: 1 }] });
+    check('mihomo: 本地配置入口替换 proxies.server', cfg.proxies[0].server === 'node1.example.net', JSON.stringify(cfg));
   }
 
   // ---------------- 入口落地检测（rename，不改）: 只做 smoke ----------------

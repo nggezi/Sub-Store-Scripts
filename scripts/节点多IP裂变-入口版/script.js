@@ -16,7 +16,7 @@
  *   3) 每个唯一 IP 复制成一个新节点，server 换成该 IP，name 换成「运营商/国家+IP首段」。
  *
  * 注意：
- *   - 只对「域名」节点裂变，server 本身是 IP 的节点原样保留；
+ *   - 只对「域名」节点裂变；server 本身是 IP 的节点不裂变，但也会查归属后改名（查不到则保留原名）；
  *   - 解析失败不抛错，会回退保留原节点；地理定位失败则回退用 EDNS 线路名命名；
  *   - 解析用「多 DoH 源轮询 + 失败换源重试 + 连续失败线性退避」，缓解单源被限速；
  *   - 解析/地理定位都做了并发限制，避免一次性打爆 DoH 或 ip-api 被限速；
@@ -332,21 +332,33 @@ async function operator(proxies = [], targetPlatform, context) {
     // 留在一个 server 已是 IP 的节点上，盲信会把 IP 节点误当域名节点再裂变一次。
     const resolvedNow = new Set();
 
+    // server 本身就是 IP 的节点：不裂变，但也要查归属后重命名（纯改名，server 不变）。
+    const ipLiteralNow = new Set();
+
     // 1. 解析所有域名节点：按 resolveLimit 控制并发，单节点内多条 EDNS 线路并发。
+    //    server 已是 IP 的节点跳过解析，但记下来，稍后统一查归属改名。
     await mapLimit(proxies || [], CONFIG.resolveLimit, async (p) => {
-      if (p && p.server && !ProxyUtils.isIP(p.server)) {
-        p._domain = p.server; // 记下原始域名，供 keepOriginal 使用
-        p._resolved_ips = await Promise.all(
-          CONFIG.edns.map(({ ip, name }) => resolve(p.server, { ip, name }))
-        );
-        resolvedNow.add(p);
+      if (!p || !p.server) return;
+      if (ProxyUtils.isIP(p.server)) {
+        ipLiteralNow.add(p);
+        return;
       }
+      p._domain = p.server; // 记下原始域名，供 keepOriginal 使用
+      p._resolved_ips = await Promise.all(
+        CONFIG.edns.map(({ ip, name }) => resolve(p.server, { ip, name }))
+      );
+      resolvedNow.add(p);
     });
 
     // 2. 汇总全局唯一 IP，并记录每个 IP 命中了哪些 EDNS 线路（解析失败时的兜底命名用）。
+    //    server 本身是 IP 的节点也把其 IP 纳入，供步骤 3 查归属。
     const ipLines = new Map();
     const allIps = new Set();
     (proxies || []).forEach((p = {}) => {
+      if (ipLiteralNow.has(p)) {
+        allIps.add(String(p.server));
+        return;
+      }
       if (!resolvedNow.has(p)) return; // 只看本次真正解析过的节点
       const ips = p._resolved_ips;
       if (!Array.isArray(ips)) return;
@@ -393,8 +405,21 @@ async function operator(proxies = [], targetPlatform, context) {
         });
         // 可选：额外保留一条原始域名节点（_domain 一定存在，这里再兜一层）
         if (CONFIG.keepOriginal && p._domain) list.push({ ...base(p), name: `原始 - ${p.name}`, server: p._domain });
+      } else if (ipLiteralNow.has(p)) {
+        // server 本身就是 IP：不裂变，但按归属改名（server 保持不变）。
+        // 查不到国家/运营商时保留原名不动，避免输出无意义名字。
+        const ip = String(p.server);
+        const geo = geoMap.get(ip) || {};
+        const cn = countryCN(geo.country, geo.countryCode);
+        const hasGeo = (geo.operator && geo.countryCode === 'CN') || cn;
+        if (hasGeo) {
+          const prefix = buildPrefix(ip, geo, undefined);
+          list.push({ ...base(p), name: `${prefix} - ${p.name}` });
+        } else {
+          list.push(base(p));
+        }
       } else {
-        // 无解析结果 / server 本身是 IP → 原样保留
+        // 无解析结果 → 原样保留
         list.push(base(p));
       }
     });
