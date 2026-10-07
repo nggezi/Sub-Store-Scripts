@@ -3,14 +3,14 @@
  * ------------------------------------------------------------------
  * 把 Sub-Store「处理」配置 entrance-geo-test-http-meta.json 脚本化：
  * 用官方脚本 API ProxyUtils.process 在一个脚本里跑完整条 process[] 链，
- * 处理链结构与导入那份 JSON 一致（默认 DNS 改为多厂商 DoH 并发、filter 改为 disabled 保留解析失败节点，见 CONFIG 注释），
+ * 处理链结构与导入那份 JSON 一致（默认 DNS 改为多厂商 DoH 并发、步骤 4 的 filter 改为 IPOnly 对齐源 JSON，见 CONFIG 注释），
  * 但可以托管到 GitHub、贴脚本链接直接用。
  *
  * 处理链（11 步，顺序不能改）：
  *   1. 快速设置      udp/tfo/skip-cert-verify 置 ENABLED
  *   2. 正则筛选      丢掉 `#` / `//` 开头的注释行
- *   3. 域名解析      解析 IPv4（provider 默认 Custom 多厂商 DoH，可用 #dns4 换）
- *   4. 域名解析      解析 IPv6，filter=disabled 保留解析失败的节点（provider 默认 Custom，可用 #dns6 换）
+ *   3. 域名解析      解析 IPv4，filter=disabled 保留解析失败的节点（provider 默认 Custom 多厂商 DoH，可用 #dns4 换）
+ *   4. 域名解析      解析 IPv6，filter=IPOnly 只留已成 IP 的节点（对齐源 JSON；provider 默认 Custom，可用 #dns6 换，可用 #filter6=disabled 改为不过滤）
  *   5. 去重          按 server+port+type 去重，清掉 _geo/_entrance
  *   6. 落地检测      xream http_meta_geo.js（经 http-meta 查出口 IP 归属）
  *   7. 入口检测      xream entrance.js（查节点服务器 IP 归属）
