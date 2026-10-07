@@ -12,12 +12,12 @@
 | --- | --- | --- |
 | 1 | 快速设置 | `udp` / `tfo` / `skip-cert-verify` 置 `ENABLED` |
 | 2 | 正则筛选 | 丢掉 `#` / `//` 开头的注释行 |
-| 3 | 域名解析 | Google 解析 IPv4 |
-| 4 | 域名解析 | Cloudflare 解析 IPv6，`filter=IPOnly` 只留已成 IP 的节点 |
+| 3 | 域名解析 | 解析 IPv4（默认 `Custom` 多厂商 DoH，可用 `#dns4` 换） |
+| 4 | 域名解析 | 解析 IPv6，`filter=IPOnly` 只留已成 IP 的节点（可用 `#filter6=disabled` 改为不过滤） |
 | 5 | 去重 | 按 `server+port+type` 去重，清掉 `_geo` / `_entrance` |
 | 6 | 落地检测 | xream `http_meta_geo.js`，经 http-meta 查出口 IP 归属 → `_geo` |
 | 7 | 入口检测 | xream `entrance.js`，查节点服务器 IP 归属 → `_entrance` |
-| 8 | 脚本筛选 | 只保留 `_geo` 和 `_entrance` 都拿到的节点 |
+| 8 | 脚本筛选 | 保留所有节点（解析失败或检测失败的也保留） |
 | 9 | 重命名 | `🇺🇸 运营商 ➮ 🇯🇵 运营商 [类型]`，入口=落地时只留落地 |
 | 10 | 排序 | 按名称升序 |
 | 11 | 重名加角标 | 重名节点追加 `⁰¹²³⁴⁵⁶⁷⁸⁹` 上标 |
@@ -31,9 +31,10 @@
 | 键 | 默认值 | 示例 | 说明 |
 | --- | --- | --- | --- |
 | `internal` | `auto` | `#internal` / `#internal=false` | 归属地数据源。`auto` 优先本地 GeoIP 库、缺库自动回退在线；`true` 强制本地；`false` 强制在线 IP 库（ip-api.com） |
-| `dns4` | `Ali` | `#dns4=Google` | 步骤 3（IPv4 解析）的 DNS 提供方 |
-| `dns6` | `Ali` | `#dns6=Cloudflare` | 步骤 4（IPv6 解析）的 DNS 提供方 |
-| `dnsUrl` | 多厂商 DoH | `#dnsUrl=https://dns.alidns.com/dns-query` | `provider=Custom` 时的 DNS 地址，多个用换行分隔（`%0A`） |
+| `dns4` | `Custom` | `#dns4=Google` | 步骤 3（IPv4 解析）的 DNS 提供方 |
+| `dns6` | `Custom` | `#dns6=Cloudflare` | 步骤 4（IPv6 解析）的 DNS 提供方 |
+| `dnsUrl` | 多厂商 DoH（国内源置前） | `#dnsUrl=https://dns.alidns.com/dns-query` | `provider=Custom` 时的 DNS 地址，多个用换行分隔（`%0A`） |
+| `filter6` | `IPOnly` | `#filter6=disabled` | 步骤 4（IPv6 解析）的过滤模式：`IPOnly` 只留已成 IP 的节点（对齐源 JSON）；`disabled` 保留解析失败的域名节点 |
 | `http_meta_host` | `127.0.0.1` | `#http_meta_host=192.168.1.100` | http-meta 服务地址 |
 | `http_meta_port` | `9876` | `#http_meta_port=9999` | http-meta 服务端口 |
 | `restore_domain` | `true` | `#restore_domain=false` | 输出前把 `server` 还原成原始域名（解析成功的节点 `server` 会被替换成 IP，原域名保存在 `_domain`） |
@@ -42,21 +43,21 @@
 
 可选 DNS 提供方：`Ali`（223.6.6.6）/ `Tencent`（119.28.28.28）/ `Google` / `Cloudflare` / `Custom` / `IP-API`。
 
-> **DNS 默认值与源 JSON 不同，这是有意改动。** 源 JSON 用 `Google` + `Cloudflare`，两者在国内可能不通；解析失败不会报错（只打日志），但步骤 4 的 `filter=IPOnly` 会把仍是域名的节点**静默丢掉**，表现为订阅里节点莫名减少。故默认改为国内直连的 `Ali`。要还原源 JSON 行为：`#dns4=Google&dns6=Cloudflare`。
+> **DNS 默认值与源 JSON 不同，这是有意改动。** 源 JSON 用 `Google` + `Cloudflare` 且 `filter=IPOnly`，两者在国内可能不通；解析失败不会报错（只打日志），但步骤 4 的 `filter=IPOnly` 会把仍是域名的节点**静默丢掉**，表现为订阅里节点莫名减少。故默认改为 `Custom` + 多厂商 DoH（国内源置前）并发查询。要还原源 JSON 的 DNS 行为：`#dns4=Google&dns6=Cloudflare`；若既要源 DNS 又想保留解析失败的节点，再加 `#filter6=disabled`。
 >
 > 注意 `IP-API` 不支持解析 IPv6，设 `dns6=IP-API` 会被脚本提前拦下报错——Sub-Store 原生行为是直接抛错导致整链失败。
 
 `internal` 会同时改变三处：落地/入口两个脚本的 `internal` 参数、以及重命名取的字段（在线库用 `country`/`isp`，GeoIP 库用 `countryCode`/`aso`）。
 
-`auto` 的探测逻辑：代理 App 版有 `$utils.geoip`/`$utils.ipaso` 即认为可用；Node.js 版构造 `ProxyUtils.MMDB()` 并用 `1.1.1.1` 试查 country + asn，两者都有值才算可用（文件缺失会抛错，被 catch 后回退在线）。实际走了哪套数据源会打进日志：`归属地数据源 = 本地 GeoIP 库 / 在线 IP 库`。
+`auto` 的探测逻辑：代理 App 版有 `$utils.geoip`/`$utils.ipaso` 即认为可用；Node.js 版构造 `ProxyUtils.MMDB()` 并用 `8.8.8.8` / `114.114.114.114` / `223.5.5.5` 轮询试查 country + asn，任一命中两者才算可用（文件缺失会抛错，被 catch 后回退在线）。实际走了哪套数据源会打进日志：`归属地数据源 = 本地 GeoIP 库 / 在线 IP 库`。
 
 ## 匹配规则 / 行为
 
-- **存活条件**：入口和落地**都**测到才保留，缺任一项即被步骤 8 丢弃（`remove_failed` 也在两个检测脚本里各生效一次）。
+- **存活条件**：**保留所有节点**（步骤 8 不过滤）。解析失败或两侧检测都失败的节点也保留，按单边信息或原名输出。
 - **去重键**：`server` + `port` + `type` 三者全同视为重复，只留第一条。
-- **`filter=IPOnly`**：步骤 4 之后仍不是 IP 的域名节点会被丢掉（解析失败、或标了 `_no-resolve`）。**解析失败不会报错**，所以 DNS 选不通的提供方会让域名节点静默消失——见上方 DNS 说明。
+- **`filter=IPOnly`**：步骤 4 之后仍不是 IP 的域名节点会被丢掉（解析失败、或标了 `_no-resolve`）。**解析失败不会报错**，所以 DNS 选不通的提供方会让域名节点静默消失——见上方 DNS 说明；需要保留这些节点时用 `#filter6=disabled`。
 - **重名判定**：步骤 11 按**改名后**的 `name` 判重，追加上标且不加连接符（`link` 为空）。
-- **未命中不改写**：解析不到、检测失败的节点不会被硬改名，而是直接被筛掉。
+- **未命中不改写**：解析不到、检测失败的节点保留原名（或按可得单边信息命名），不会被筛掉。
 
 ### 降级策略（重要）
 
@@ -67,7 +68,7 @@
 | http-meta 不可达 | 跳过落地检测，只用入口信息改名 | `http-meta 不可达（127.0.0.1:9876）…` |
 | 本地 GeoIP 库不可用 | 跳过入口检测，只用落地信息改名 | `MMDB 不可用（…），回退在线库` |
 | 两边都失败 | 跳过改名，返回原节点 | `入口与落地检测全部失败…` |
-| 单边部分失败 | 按原版行为丢弃失败节点 | `检测结果 —— 落地 X/Y，入口 Z/W` |
+| 单边部分失败 | 保留节点，按单边信息命名 | `检测结果 —— 落地 X/Y，入口 Z/W` |
 
 降级时节点名只有单边信息（如 `🇺🇸 ISP-1 [ss]`，没有 `➮`），便于识别。
 
@@ -99,7 +100,7 @@
 用法：订阅 → **节点操作** → **脚本操作** → 填本文件的 raw 链接，可带 `#` 参数。
 
 ```
-# 默认：优先本地 GeoIP 库（缺库自动回退），DNS 走国内 Ali
+# 默认：优先本地 GeoIP 库（缺库自动回退），DNS 走 Custom 多厂商 DoH（国内源置前）
 https://raw.githubusercontent.com/nggezi/Sub-Store-Scripts/main/scripts/入口落地检测/script.js
 
 # 强制本地 GeoIP 库

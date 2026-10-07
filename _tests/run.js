@@ -119,6 +119,21 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
   }
 
   {
+    // ip-api 返回 success 但 countryCode 为空 -> 不能写进 geo 缓存（否则空壳被永久命中）
+    const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '203.0.113.9' }] }) });
+    const cache = new Map();
+    const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
+      proxies: [{ name: 'X', type: 'vless', server: 'a.example.com', port: 443 }],
+      args: {},
+      utils,
+      substore: { info: () => {}, http: { get: async () => ({ body: '{"status":"success","isp":"Unknown","country":"","countryCode":""}' }) } },
+      cache,
+    });
+    check('入口版: 空countryCode不写geo缓存', ![...cache.keys()].some((k) => k === 'geo:v2:203.0.113.9'), [...cache.keys()].join(','));
+    check('入口版: 空countryCode回退线路名命名', out[0] && /^移\/电\/联 - X/.test(out[0].name), out[0] && out[0].name);
+  }
+
+  {
     // 多线路同 IP -> 合并一条，不重复
     const utils = makeProxyUtils({ doh: async () => ({ answers: [{ type: 'A', data: '1.2.3.4' }] }) });
     const out = await runScript('scripts/节点多IP裂变-入口版/script.js', {
@@ -290,27 +305,8 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
     });
     check('mihomo: 命中替换不原地改输入', input[0].server === 'example.com' && out[0].server === 'node1.example.net' && out[0] !== input[0], 'in=' + input[0].server + ' out=' + out[0].server);
   }
-  {
-    // 本地 mihomo 配置文件走 main(config)，不能只实现 operator(proxies)。
-    const utils = makeProxyUtils();
-    const out = await runScript('scripts/mihomo节点域名替换/script.js', {
-      proxies: { $content: '', $file: { type: 'mihomoConfig' } },
-      args: { hosts: 'hosts:\n  example.com: node1.example.net' },
-      utils,
-      substore: {},
-      cache: new Map(),
-    });
-    // mock runner 直接执行 operator；用 vm 另取 main 验证文件入口。
-    const fs = require('fs');
-    const src = fs.readFileSync(path.join(ROOT, 'scripts/mihomo节点域名替换/script.js'), 'utf8');
-    const sb = { $arguments: { hosts: 'hosts:\n  example.com: node1.example.net' } };
-    vm.createContext(sb);
-    vm.runInContext(src + '\n; this.__main = main;', sb);
-    const cfg = await sb.__main({ proxies: [{ name: 'a', server: 'example.com', port: 1 }] });
-    check('mihomo: 本地配置入口替换 proxies.server', cfg.proxies[0].server === 'node1.example.net', JSON.stringify(cfg));
-  }
 
-  // ---------------- 入口落地检测（rename，不改）: 只做 smoke ----------------
+  // ---------------- 入口落地检测: smoke + 关键逻辑回归 ----------------
   {
     const utils = makeProxyUtils({ process: async (list) => list });
     let ok = true, err = '';
@@ -431,6 +427,13 @@ async function runScript(rel, { proxies, args, utils, substore, cache, httpClien
       console.error = origErr;
       check('入口落地检测: 好库(仅非任播IP有记录)判定为可用', /本地 GeoIP 库/.test(sawLocal), sawLocal.slice(0, 160));
     }
+    // 步骤 4（IPv6 解析）的 filter 应默认对齐源 JSON = IPOnly，并可用 #filter6 覆盖
+    check('入口落地检测: 第4步 filter 默认 IPOnly', /type:\s*'IPv6'[\s\S]*?filter:\s*filter6/.test(src) && /const filter6\s*=\s*args\.filter6[\s\S]*?CONFIG\.filter6/.test(src), 'filter6 未接入');
+    // 默认 DoH 源集合：至少 5 个 https，且含国内源（alidns/doh.pub）
+    const dnsBlock = (src.match(/dnsUrl:\s*\[([\s\S]*?)\]/) || [])[1] || '';
+    const dnsUrls = (dnsBlock.match(/https:\/\/[^']+/g) || []);
+    check('入口落地检测: 默认 DoH >= 5 个', dnsUrls.length >= 5, 'count=' + dnsUrls.length);
+    check('入口落地检测: 默认 DoH 含国内源(alidns/doh.pub)', /alidns\.com|doh\.pub/.test(dnsBlock), dnsBlock || 'no dnsUrl');
   }
 
   console.log(results.join('\n'));

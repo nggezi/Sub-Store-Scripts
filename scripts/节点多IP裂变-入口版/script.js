@@ -302,8 +302,10 @@ async function operator(proxies = [], targetPlatform, context) {
   const geoip = async (ip) => {
     const key = GEO_CACHE_VER + ip;
     const cached = cacheGet(key);
-    // 命中且结构完整（含 countryCode 字段）才复用；否则视为无效缓存，重新查询并覆盖。
-    if (cached && cached.countryCode !== undefined) return cached;
+    // 命中且 countryCode 非空（能用于命名）才复用；否则视为无效缓存，重新查询并覆盖。
+    // 注意空串 countryCode 也算无效：否则 ip-api 偶发返回 success 但国家为空时，
+    // 会把空壳写进缓存并被永久命中，命名退化成线路名。
+    if (cached && cached.countryCode) return cached;
     let operator = '';
     let country = '';
     let countryCode = '';
@@ -319,8 +321,8 @@ async function operator(proxies = [], targetPlatform, context) {
     } catch (e) {}
     log(`geoip ${ip} => operator=${operator || '?'}, country=${country || '?'}(${countryCode || '?'})`);
     const geo = { operator, country, countryCode };
-    // 只有查到了国家/地区（能用于命名）才写缓存；完全失败下次重试。
-    if (ok) cacheSet(key, geo);
+    // 只有查到了国家/地区（countryCode 非空，能用于命名）才写缓存；否则下次重试。
+    if (ok && countryCode) cacheSet(key, geo);
     return geo;
   };
 

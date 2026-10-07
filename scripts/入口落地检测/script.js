@@ -44,16 +44,22 @@ async function operator(proxies = [], targetPlatform, context) {
     // 所以这里换了默认值；要还原源 JSON 行为用 #dns4=Google&dns6=Cloudflare
     dns4: 'Custom',
     dns6: 'Custom',
-    // provider=Custom 时的 DoH 地址，多个用换行分隔，Sub-Store 会并发查询
+    // provider=Custom 时的 DoH 地址，多个用换行分隔，Sub-Store 会对整组并发查询。
+    // 注：换源/限速退避由 Sub-Store 原生 Resolve Domain Operator 处理，脚本不介入；
+    //     单源被 ban 时并发组里其它源仍能出结果，故这里放多家（国内源置前，排障时优先命中）。
     dnsUrl: [
       'https://dns.alidns.com/dns-query',
+      'https://doh.pub/dns-query',
       'https://dns.google/dns-query',
       'https://cloudflare-dns.com/dns-query',
-      'https://doh.pub/dns-query',
       'https://dns.quad9.net/dns-query',
     ].join('\n'),
     retries: '1',
     timeout: '1999',
+    // 步骤 4（IPv6 解析）的过滤模式，对齐源 JSON（entrance-geo-test-http-meta.json）
+    //   'IPOnly'   = 只保留已成 IP 的节点（源 JSON 行为，默认）
+    //   'disabled' = 不过滤，解析失败的域名节点保留（旧脚本行为，用 #filter6=disabled 还原）
+    filter6: 'IPOnly',
     // 是否在输出前把 server 还原成原始域名（默认 true）
     // 解析成功的节点 server 会被替换成 IP，原域名保存在 _domain；开启后还原
     restoreDomain: true,
@@ -70,6 +76,7 @@ async function operator(proxies = [], targetPlatform, context) {
   const retries = args.retries === undefined ? CONFIG.retries : String(args.retries)
   const timeout = args.timeout === undefined ? CONFIG.timeout : String(args.timeout)
   const restoreDomain = args.restore_domain === undefined ? CONFIG.restoreDomain : toBool(args.restore_domain)
+  const filter6 = args.filter6 === undefined ? CONFIG.filter6 : String(args.filter6)
 
   // DNS provider 必须先校验：ResolveDomainOperator 的工厂函数会直接 throw，
   // 而那个 throw 发生在 process 循环里，会把整条链炸掉而不是跳过单步
@@ -80,7 +87,7 @@ async function operator(proxies = [], targetPlatform, context) {
   console.log(`[SCOPE] INFO: 归属地数据源 = ${internal ? '本地 GeoIP 库' : '在线 IP 库'}（internal=${rawInternal}）`);
   // 强制 internal 但库其实不可用：下游 entrance.js 的 valid 校验会让所有节点缺 _entrance，
   // 步骤 8 全部筛掉，表现为「订阅变空」。这里先把原因喊出来，免得用户查半天。
-  if (internal && rawInternal !== 'auto' && !hasLocalGeoip(ProxyUtils)) {
+  if (internal && rawInternal !== 'auto' && !localGeoip) {
     console.error('[SCOPE] ERROR: 已强制 internal 但本地 GeoIP 库不可用（MMDB 路径未配置或文件缺失），' +
       '入口检测将全部失败导致输出为空；请配置 SUB_STORE_MMDB_COUNTRY_PATH / SUB_STORE_MMDB_ASN_PATH，或去掉 #internal 改用在线库');
   }
@@ -145,10 +152,10 @@ async function operator(proxies = [], targetPlatform, context) {
       type: 'Resolve Domain Operator',
       args: { provider: dns4, type: 'IPv4', filter: 'disabled', cache: 'enabled', url: dnsUrl },
     },
-    // 再补一轮 IPv6；filter=disabled 不过滤
+    // 再补一轮 IPv6；默认 filter=IPOnly 只保留已成 IP 的节点（对齐源 JSON），可用 #filter6=disabled 改为不过滤
     {
       type: 'Resolve Domain Operator',
-      args: { provider: dns6, type: 'IPv6', filter: 'disabled', cache: 'enabled', url: dnsUrl },
+      args: { provider: dns6, type: 'IPv6', filter: filter6, cache: 'enabled', url: dnsUrl },
     },
     // 同 server+port+type 视为重复节点，只留第一条
     { type: 'Script Operator', args: { mode: 'script', content: DEDUP_SCRIPT } },
@@ -251,6 +258,24 @@ function resolveInternal(value, localGeoip) {
   return toBool(value)
 }
 
+// GeoIP 库探针：探针 IP 不能用 1.1.1.1 —— 它是 Cloudflare 任播地址，
+// GeoLite2-Country 里只有 registeredCountry 没有 country，geoip() 返回 undefined，
+// 会让「好库被误判为坏库」。轮询几个 host 段稳定、必然有 country 记录的 IP。
+const PROBE_IPS = ['8.8.8.8', '114.114.114.114', '223.5.5.5'];
+
+// 从 MMDB 实例探测库是否可用：任一探针 IP 同时查到 country 和 asn 即算可用。
+// 单独抽出来是为了能脱离 Sub-Store 运行时做纯函数测试。
+function pickGeoipProbe(mmdb) {
+  let country;
+  let asn;
+  for (const ip of PROBE_IPS) {
+    if (!country && mmdb && mmdb.geoip) country = mmdb.geoip(ip);
+    if (!asn && mmdb && mmdb.ipaso) asn = mmdb.ipaso(ip);
+    if (country && asn) break;
+  }
+  return { country, asn };
+}
+
 // 本地 GeoIP 库是否真的可用。三处都会用到它，必须和下游脚本的判断保持一致：
 //   - 代理 App 版：entrance.js 靠 $utils.geoip / $utils.ipaso
 //   - Node.js 版：靠 ProxyUtils.MMDB（读 SUB_STORE_MMDB_COUNTRY_PATH / ASN_PATH）
@@ -272,21 +297,9 @@ function hasLocalGeoip(ProxyUtils) {
     /* $utils 未定义时 typeof 不会抛，这里兜个底 */
   }
   // Node.js 版：country 和 asn 两个库都得在，否则重名改名时会缺字段
-  // 探针 IP 不能用 1.1.1.1：它是 Cloudflare 任播地址，GeoLite2-Country 里只有
-  // registeredCountry 没有 country，geoip() 会返回 undefined，造成「好库被误判为坏库」。
-  // 这里轮询几个 host 段稳定、必然有 country 记录的 IP，任一命中即认为库可用。
-  const PROBE_IPS = ['8.8.8.8', '114.114.114.114', '223.5.5.5'];
   try {
     const mmdb = new ProxyUtils.MMDB();
-    let country = undefined;
-    let asn = undefined;
-    for (const ip of PROBE_IPS) {
-      const c = mmdb && mmdb.geoip(ip);
-      const a = mmdb && mmdb.ipaso(ip);
-      if (c) country = country || c;
-      if (a) asn = asn || a;
-      if (country && asn) break;
-    }
+    const { country, asn } = pickGeoipProbe(mmdb);
     if (!country || !asn) {
       console.error(`[SCOPE] ERROR: MMDB 文件存在但查询失败（geoip=${country}, ipaso=${asn}），回退在线库`);
     }
