@@ -21,6 +21,8 @@
  *   - 解析用「多 DoH 源轮询 + 失败换源重试 + 连续失败线性退避」，缓解单源被限速；
  *   - 解析/地理定位都做了并发限制，避免一次性打爆 DoH 或 ip-api 被限速；
  *   - 所有可调项集中在下方 CONFIG，运行时也可用脚本参数覆盖；
+ *   - 自定义 DoH：脚本参数 key 填 `doh`（或 `dohs`），value 可直接粘一段
+ *     mihomo 风格的 `nameserver:` YAML 文本，脚本会自动抽取其中的 http(s) 地址；
  *   - 缓存：解析结果与归属地都走 Sub-Store 的 scriptResourceCache（key 带版本号，升级可整体作废）；
  *     若以 mode=link 方式引入本脚本，可在链接后加 #noCache 让 Sub-Store 每次都重新拉取脚本内容（不吃脚本下载缓存）。
  */
@@ -91,8 +93,47 @@ async function operator(proxies = [], targetPlatform, context) {
   };
   // ============================================================
 
+  // 从一段文本里提取 DoH 地址：既认「一行一个 URL」，也认 mihomo/Clash 风格的
+  // `nameserver:` YAML 块（含 `- https://...` 子项），还认 JSON 数组/对象。
+  // 例（key=doh / key=dohs 的 value 可直接粘下面这段）：
+  //   nameserver:
+  //     - https://hydrogen1693.com:44443/dns-query/<id>
+  //     - https://subprime7404.com:44443/dns-query/<id>
+  // 只保留 http(s) 开头的 URL，其余行（缩进、`nameserver:`、注释、`#` 行）一律忽略。
+  const extractDohUrls = (input) => {
+    // 数组：逐个元素递归（元素可能是 URL 字符串）
+    if (Array.isArray(input)) {
+      return input.map((x) => extractDohUrls(x)).flat().filter(Boolean);
+    }
+    // 对象：把所有 value 递归进来（兼容 { nameserver: [...] } / { dohs: [...] }）
+    if (input && typeof input === 'object') {
+      return Object.values(input).map((x) => extractDohUrls(x)).flat().filter(Boolean);
+    }
+    const s = String(input == null ? '' : input).trim();
+    if (!s) return [];
+    // 字符串形式的 JSON（数组或对象）先解析
+    if (s.startsWith('[') || s.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(s);
+        if (parsed && typeof parsed === 'object') return extractDohUrls(parsed);
+      } catch (e) { /* 不是 JSON，当普通文本处理 */ }
+    }
+    // 文本扫描：抓出所有 http(s):// 开头的地址（兼容一行一条 / YAML 列表项 / 行内多地址）。
+    // 用宽松的贪婪匹配到空白/引号/行尾，允许端口与路径（如 :44443/dns-query/<id>）。
+    const out = [];
+    const re = /https?:\/\/[^\s"'`,]+/gi;
+    let m;
+    while ((m = re.exec(s))) {
+      // 去掉粘贴时可能带上的行尾逗号
+      const url = m[0].replace(/[;,]+$/, '');
+      if (url && !out.includes(url)) out.push(url);
+    }
+    return out;
+  };
+
   // 运行时参数（Sub-Store「键/值」）可覆盖 CONFIG 中的 edns / dohs / doh / seq。
-  // 支持三种格式：JSON 数组（只给 edns）、JSON 对象、以及 Sub-Store 传的对象。
+  // 支持多种格式：JSON 数组（只给 edns）、JSON 对象、Sub-Store 传的对象，
+  // 以及 doh/dohs 直接粘贴的 `nameserver:` YAML 文本（自动抽取其中 DoH 地址）。
   try {
     if (typeof $arguments !== 'undefined' && $arguments) {
       let arg = $arguments;
@@ -105,11 +146,21 @@ async function operator(proxies = [], targetPlatform, context) {
         if (arg.length) CONFIG.edns = arg; // 参数直接是 edns 数组
       } else if (arg && typeof arg === 'object') {
         if (Array.isArray(arg.edns) && arg.edns.length) CONFIG.edns = arg.edns;
-        // dohs 优先（数组），其次兼容单个 doh 字符串
-        if (Array.isArray(arg.dohs) && arg.dohs.length) CONFIG.dohs = arg.dohs;
-        else if (typeof arg.doh === 'string' && arg.doh) CONFIG.dohs = [arg.doh];
+        // dohs 优先（数组），其次 doh；
+        // doh/dohs 的 value 也可以是文本（含 nameserver YAML 块），统一抽取其中 DoH 地址。
+        if (arg.dohs != null) {
+          const urls = extractDohUrls(arg.dohs);
+          if (urls.length) CONFIG.dohs = urls;
+        } else if (arg.doh != null) {
+          const urls = extractDohUrls(arg.doh);
+          if (urls.length) CONFIG.dohs = urls;
+        }
         // seq 兼容 true / 'true' / 1 / '1'
         if (arg.seq != null) CONFIG.seq = arg.seq === true || arg.seq === 'true' || arg.seq === 1 || arg.seq === '1';
+      } else if (typeof arg === 'string') {
+        // 非 JSON 的纯文本参数：直接当作 DoH 配置文本抽取（方便只填一段 nameserver）。
+        const urls = extractDohUrls(arg);
+        if (urls.length) CONFIG.dohs = urls;
       }
     }
   } catch (e) {}

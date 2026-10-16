@@ -20,7 +20,7 @@
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
-| `dohs` | 腾讯/阿里/Cloudflare/Google/Quad9 | DoH 服务器列表，多源轮询；失败自动换源 |
+| `dohs` | 腾讯/阿里/Cloudflare/Google/Quad9 | DoH 服务器列表，多源轮询；失败自动换源（参数 `doh`/`dohs` 可覆盖，支持粘 `nameserver` 文本） |
 | `resolveRetries` | `3` | 单条解析最多尝试几个 DoH 源（换源重试上限） |
 | `resolveBackoffAfter` | `2` | 连续失败达该次数后插入退避等待（0 = 关闭） |
 | `resolveBackoffMs` | `800` | 退避基础毫秒，实际等待 = base × 已退避轮次（线性） |
@@ -34,7 +34,7 @@
 
 ## 参数
 
-在「脚本操作」的参数中填写 **键 / 值**，可运行时覆盖以下 4 项（其余 `CONFIG` 项请直接改脚本顶部）：`edns` / `dohs` / `doh` / `seq`。
+在「脚本操作」的参数中填写 **键 / 值**，可运行时覆盖以下 4 项（其余 `CONFIG` 项请直接改脚本顶部）：`edns` / `dohs` / `doh` / `seq`。其中 `doh`/`dohs` 的值可直接粘一段 `nameserver:` 文本，脚本会自动抽取 DoH 地址（见下方「自定义 DoH」）。
 
 - 键 `edns`：JSON 数组，每个元素含 `name`（线路标签）和 `ip`（ECS 客户端 IP）
 
@@ -45,6 +45,22 @@
 - 键 `dohs`：JSON 数组，DoH 服务器列表（优先），如 `["https://doh.pub/dns-query","https://dns.alidns.com/dns-query"]`
 - 键 `doh`：单个 DoH 服务器地址（兼容旧写法，会转成单元素 `dohs`），如 `https://223.6.6.6/dns-query`
 - 键 `seq`：命名是否带序号，默认关闭（`false`）
+
+### 自定义 DoH（支持直接粘 `nameserver` 文本）
+
+有些节点必须用**特定 DoH** 才能解析出正确入口（例如自建/私有解析服务）。此时把参数键写 `doh`（或 `dohs`），值**直接粘一段 mihomo/Clash 风格的 `nameserver:` 文本即可**，脚本会自动抽取其中的 http(s) 地址当作 DoH 源：
+
+```yaml
+nameserver:
+    - https://hydrogen1693.com:44443/dns-query/<id>
+    - https://subprime7404.com:44443/dns-query/<id>
+    - https://tribunal2944.com/dns-query/<id>
+```
+
+- 也可只填一行一个 URL 的纯文本，或 JSON 数组 `["https://a/dns-query","https://b/dns-query"]`；
+- 抽取出的多个地址会按 `dohs` 的**多源轮询 + 失败换源**机制使用（顺序即粘贴顺序）；
+- 非 URL 行（缩进、`nameserver:`、`#` 注释）会被自动忽略；
+- 参数若是**纯文本**（非 JSON、非键/值对象），脚本会把它整段当作 DoH 配置文本处理。
 
 **默认值**：不填时用 `CONFIG` 里的默认值。
 
